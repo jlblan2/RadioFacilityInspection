@@ -1,0 +1,27 @@
+# Runtime databases
+*.db
+*.db-shm
+*.db-wal
+
+# Session / archive data
+*.json
+
+# Excel workbooks (binary / encrypted)
+*.xlsm
+*.xlsx
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+
+# Misc
+Save/
+files.zip
+requirements/
+NetLog_Audit_Report_2.md
+netlog-1.py
