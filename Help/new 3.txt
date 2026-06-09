@@ -1,0 +1,7 @@
+Please convert my complicated radio log model in this folder
+(netlog.xlsx and Netlog Archives.xlsx) from Excel to a python module. It should work look identically to the original excel screens with the exception that worksheet (Email List) should be come a table in a new sql database and accessed from the python module. The passwords needed are thunder, Thunder, and THUNDER. Let's start with you doing a full audit of the sheet and all workbooks. Then come up with a plan to implement this and verify outputs against the Excel model. Use multiple
+subagents if helpful
+
+Please convert my complicated radio log model in this folder
+(netlog.xlsx and Netlog Archives.xlsx) from Excel to a python module. It should work and look identically to the original excel screens with the exception that worksheet (Email List) should be come a table in a new sql database and accessed from the python module. The passwords needed are thunder, Thunder, and THUNDER. Let's start with you doing a full audit of the sheet and all workbooks. Then come up with a plan to implement this and verify outputs against the Excel model. Use multiple
+subagents if helpful
