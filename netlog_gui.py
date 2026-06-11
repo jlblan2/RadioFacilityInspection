@@ -19,6 +19,7 @@ sys.path.insert(0, BASE)
 from netlog import (
     NetSession, CheckIn,
     lookup_operator, lookup_city, lookup_state, lookup_sector,
+    lookup_coords,
     count_by_sector, format_freq_display,
     save_to_archive, load_archives, get_db, get_archive_db, load_matrices,
     get_freq_display, get_sectors, get_transceivers, get_net_names,
@@ -526,7 +527,7 @@ class LogTab(ttk.Frame):
             # Exit edit mode if we were in it
             self._set_add_mode()
             idx = int(iid[2:])
-            pending = self._get_pending_primary()
+            pending = self._get_pending_stations()
             if idx >= len(pending):
                 return
             ci = pending[idx]
@@ -683,6 +684,22 @@ class LogTab(ttk.Frame):
             propagation=propagation,
             **signals,
         )
+
+        # ── Notify if the FROM station is a known member with no lat/lon ──────
+        lat, _ = lookup_coords(from_cs)
+        if lat is None and lookup_operator(from_cs) != 'Callsign FROM Not Found':
+            messagebox.showinfo(
+                'No Lat/Long Information',
+                f'No latitude / longitude data is on file for  {from_cs}.\n\n'
+                f'Distance and bearing cannot be calculated for this check-in.\n'
+                f'Add coordinates in the Members tab to enable great-circle D&B.',
+                parent=self)
+            # Blank dist/bearing in the just-added check-in dict
+            active = self.app.session.get_active_checkins()
+            if active:
+                active[-1]['distance_miles']  = ''
+                active[-1]['bearing_degrees'] = ''
+
         self.refresh_table()
         self._reset_form()
         n = len(self.app.session.get_active_checkins())
@@ -787,15 +804,35 @@ class LogTab(ttk.Frame):
             self.app.destroy()
 
     # ── Display refresh ───────────────────────────────────────────────────────
-    def _get_pending_primary(self) -> list:
-        """Primary check-ins whose callsign has no entry yet in the current alt log."""
+    def _get_pending_stations(self) -> list:
+        """
+        Stations from higher-priority frequencies not yet confirmed on the
+        current frequency.
+
+        1ST ALT  → stations from PRIMARY not yet on 1ST ALT
+        2ND ALT  → stations from PRIMARY *and* 1ST ALT not yet on 2ND ALT
+                   (deduplicated by callsign; PRIMARY entry takes precedence)
+        """
         s = self.app.session
         if s.freq_type == 'PRIMARY':
             return []
+
         confirmed = {ci.get('from_callsign', '').upper()
                      for ci in s.get_active_checkins()}
-        return [ci for ci in s.checkins
-                if ci.get('from_callsign', '').upper() not in confirmed]
+
+        if s.freq_type == '1ST ALT':
+            return [ci for ci in s.checkins
+                    if ci.get('from_callsign', '').upper() not in confirmed]
+
+        # 2ND ALT — merge PRIMARY then 1ST ALT, skip duplicates and already-confirmed
+        seen    = set()
+        pending = []
+        for ci in s.checkins + s.checkins_alt1:
+            cs = ci.get('from_callsign', '').upper()
+            if cs and cs not in confirmed and cs not in seen:
+                seen.add(cs)
+                pending.append(ci)
+        return pending
 
     def refresh_table(self):
         for item in self.tree.get_children():
@@ -804,7 +841,7 @@ class LogTab(ttk.Frame):
 
         # ── Pending rows: PRIMARY stations not yet confirmed on this alt freq ──
         if s.freq_type != 'PRIMARY':
-            for i, ci in enumerate(self._get_pending_primary()):
+            for i, ci in enumerate(self._get_pending_stations()):
                 sig = ' '.join(c for c in SIG_CODES if ci.get(f'signal_{c}'))
                 self.tree.insert('', 'end', iid=f'p:{i}', tag='pending', values=(
                     ci.get('checkin_order', ''),
