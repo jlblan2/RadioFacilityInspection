@@ -415,6 +415,19 @@ def _fuzzy_match(callsign: str, members: Optional[dict] = None) -> Optional[str]
     return row[0] if row else None
 
 
+def find_matching_callsigns(partial: str) -> list:
+    """Return all members whose callsign contains `partial` (case-insensitive).
+    Each item is a sqlite3.Row with callsign, operator_name, city, state, sector."""
+    if not partial:
+        return []
+    cs_upper = partial.strip().upper()
+    return get_db().execute(
+        "SELECT callsign, operator_name, city, state, sector "
+        "FROM members WHERE INSTR(UPPER(callsign),?)>0 ORDER BY callsign",
+        (cs_upper,)
+    ).fetchall()
+
+
 def lookup_operator(callsign: str, members: Optional[dict] = None) -> str:
     """=IFERROR(INDEX(Email!B, MATCH("*"&D21, Email!A,)), "Callsign FROM Not Found")"""
     if members is not None:
@@ -640,6 +653,7 @@ class CheckIn:
     signal_D: bool = False
     signal_WI: bool = False
     signal_I: bool = False
+    signal_NH: bool = False
     has_traffic: bool = False
     traffic_destination: str = ""
     traffic_notes: str = ""
@@ -813,7 +827,7 @@ def _insert_checkin_row(conn: sqlite3.Connection,
             from_callsign, to_callsign, checkin_time, manual_time,
             noise_level, antenna,
             signal_L, signal_G, signal_W, signal_VW, signal_F,
-            signal_C, signal_R, signal_UR, signal_D, signal_WI, signal_I,
+            signal_C, signal_R, signal_UR, signal_D, signal_WI, signal_I, signal_NH,
             has_traffic, traffic_destination, traffic_notes, propagation,
             from_operator, to_operator, city, state, sector,
             distance_miles, bearing_degrees, checkin_order, dest_operator
@@ -822,7 +836,7 @@ def _insert_checkin_row(conn: sqlite3.Connection,
             ?,?,?,?,
             ?,?,
             ?,?,?,?,?,
-            ?,?,?,?,?,?,
+            ?,?,?,?,?,?,?,
             ?,?,?,?,
             ?,?,?,?,?,
             ?,?,?,?
@@ -843,6 +857,7 @@ def _insert_checkin_row(conn: sqlite3.Connection,
         int(bool(ci.get('signal_D',  False))),
         int(bool(ci.get('signal_WI', False))),
         int(bool(ci.get('signal_I',  False))),
+        int(bool(ci.get('signal_NH', False))),
         int(bool(ci.get('has_traffic', False))),
         ci.get('traffic_destination', ''), ci.get('traffic_notes', ''),
         ci.get('propagation', ''),
@@ -905,6 +920,7 @@ def _init_archive_db(path: str) -> sqlite3.Connection:
             signal_D            INTEGER DEFAULT 0,
             signal_WI           INTEGER DEFAULT 0,
             signal_I            INTEGER DEFAULT 0,
+            signal_NH           INTEGER DEFAULT 0,
             has_traffic         INTEGER DEFAULT 0,
             traffic_destination TEXT,
             traffic_notes       TEXT,
@@ -921,6 +937,13 @@ def _init_archive_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.commit()
+
+    # ── Migrate existing archive checkins table: add signal_NH if absent ─────
+    try:
+        conn.execute("ALTER TABLE checkins ADD COLUMN signal_NH INTEGER DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
 
     # ── Migrate existing JSON archives on first run ───────────────────────────
     if conn.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] == 0:

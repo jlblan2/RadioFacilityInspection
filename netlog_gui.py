@@ -19,7 +19,8 @@ sys.path.insert(0, BASE)
 from netlog import (
     NetSession, CheckIn,
     lookup_operator, lookup_city, lookup_state, lookup_sector,
-    lookup_coords,
+    lookup_coords, find_matching_callsigns,
+    lookup_distance, lookup_bearing,
     count_by_sector, format_freq_display,
     save_to_archive, load_archives, get_db, get_archive_db, load_matrices,
     get_freq_display, get_sectors, get_transceivers, get_net_names,
@@ -70,10 +71,11 @@ FT = (_FF, 13, 'bold')
 FS = (_FF,  9)
 FM = (_FM, 10)          # monospace for callsigns
 
-SIG_CODES = ['L','G','W','VW','F','C','R','UR','D','WI','I']
+SIG_CODES = ['L','G','W','VW','F','C','R','UR','D','WI','I','NH']
 SIG_TIP   = {'L':'Loud','G':'Good','W':'Weak','VW':'V.Weak','F':'Fading',
              'C':'Clear','R':'Readable','UR':'Unreadable',
-             'D':'Distorted','WI':'W/Interference','I':'Intermittent'}
+             'D':'Distorted','WI':'W/Interference','I':'Intermittent',
+             'NH':'Nothing Heard'}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -267,6 +269,88 @@ class MemberDialog(tk.Toplevel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CALLSIGN PICKER DIALOG
+# ─────────────────────────────────────────────────────────────────────────────
+class CallsignPickerDialog(tk.Toplevel):
+    """Modal dialog shown when a partial callsign matches multiple members."""
+
+    def __init__(self, parent, matches):
+        super().__init__(parent)
+        self.title('Select Callsign')
+        self.resizable(False, False)
+        self.result = None
+
+        cols = ('Callsign', 'Name', 'City', 'State', 'Sector')
+        widths = (100, 220, 110, 55, 130)
+        tree = ttk.Treeview(self, columns=cols, show='headings', height=min(len(matches), 12))
+        for col, w in zip(cols, widths):
+            tree.heading(col, text=col)
+            tree.column(col, width=w, anchor='w')
+        for row in matches:
+            tree.insert('', 'end', values=(
+                row['callsign'],
+                row['operator_name'] or '',
+                row['city'] or '',
+                row['state'] or '',
+                row['sector'] or '',
+            ))
+        tree.pack(side='top', fill='both', expand=True, padx=8, pady=(8, 4))
+        tree.focus_set()
+        if tree.get_children():
+            first = tree.get_children()[0]
+            tree.selection_set(first)
+            tree.focus(first)
+
+        def _confirm(_evt=None):
+            sel = tree.selection()
+            if sel:
+                self.result = tree.set(sel[0], 'Callsign')
+            self.destroy()
+
+        def _cancel(_evt=None):
+            self.destroy()
+
+        tree.bind('<Double-1>', _confirm)
+        tree.bind('<Return>', _confirm)
+
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(side='bottom', pady=(0, 8))
+        tk.Button(btn_frame, text='Select', width=10, command=_confirm).pack(side='left', padx=6)
+        tk.Button(btn_frame, text='Cancel', width=10, command=_cancel).pack(side='left', padx=6)
+        self.bind('<Escape>', _cancel)
+
+        self.transient(parent)
+        self.grab_set()
+        self.update_idletasks()
+        # Centre over parent
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        self.geometry(f'+{px + (pw - w) // 2}+{py + (ph - h) // 2}')
+        parent.wait_window(self)
+
+
+def _resolve_callsign_partial(typed: str, entry_var: tk.StringVar,
+                               parent: tk.Widget) -> str:
+    """Shared helper: auto-fill or show picker for a partial callsign.
+    Returns the resolved callsign, or `typed` unchanged if no match / cancelled."""
+    if not typed:
+        return typed
+    matches = find_matching_callsigns(typed)
+    if not matches or any(r['callsign'].upper() == typed for r in matches):
+        return typed          # no hits, or already exact
+    if len(matches) == 1:
+        resolved = matches[0]['callsign']
+        entry_var.set(resolved)
+        return resolved
+    dlg = CallsignPickerDialog(parent.winfo_toplevel(), matches)
+    if dlg.result:
+        entry_var.set(dlg.result)
+        return dlg.result
+    return typed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — NET LOG  (main operational screen)
 # ─────────────────────────────────────────────────────────────────────────────
 class LogTab(ttk.Frame):
@@ -274,6 +358,7 @@ class LogTab(ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
+        self._cs_resolving = False   # guard against recursive FocusOut during picker
         self._build_header()
         self._build_body()
         self._build_add_panel()
@@ -448,7 +533,7 @@ class LogTab(ttk.Frame):
         self.e_to.bind('<FocusOut>', lambda _: self._lookup_to())
         self.e_to.bind('<Return>',   lambda _: self._lookup_to())
 
-        self.lbl_to = tk.Label(af, text='', font=FS, fg='#666', anchor='w', width=24)
+        self.lbl_to = tk.Label(af, text='', font=FS, fg='#666', anchor='w', width=44)
         self.lbl_to.grid(row=0, column=7, sticky='w', padx=4)
 
         # Row 1 — Time
@@ -469,7 +554,7 @@ class LogTab(ttk.Frame):
             b = SigBtn(sf, code)
             b.pack(side='left', padx=2)
             self.sig_btns[code] = b
-            if code == 'F':  # separator between strength / quality groups
+            if code in ('F', 'I'):  # separators between signal groups
                 tk.Label(sf, text='|', font=FA, fg='#AAA').pack(side='left', padx=2)
 
         tk.Label(sf, text='  Prop:', font=FB).pack(side='left', padx=(12, 3))
@@ -490,6 +575,8 @@ class LogTab(ttk.Frame):
         self.e_dest = tk.Entry(trf, textvariable=self.v_dest,
                                font=FM, bg=ENTRY_BG, width=11, state='disabled')
         self.e_dest.pack(side='left', padx=(3, 12))
+        self.e_dest.bind('<Return>',   lambda _: self._lookup_dest())
+        self.e_dest.bind('<FocusOut>', lambda _: self._lookup_dest())
         tk.Label(trf, text='Notes:', font=FA).pack(side='left')
         self.v_notes = tk.StringVar()
         self.e_notes = tk.Entry(trf, textvariable=self.v_notes,
@@ -576,12 +663,24 @@ class LogTab(ttk.Frame):
             self._btn_main.config(text='  UPDATE CHECK-IN  ',
                                   bg='#2A6099', command=self._do_update)
 
+    def _resolve_callsign(self, typed: str, entry_var: tk.StringVar) -> str:
+        """Wraps _resolve_callsign_partial with a re-entrancy guard (FocusOut fires
+        when the picker dialog opens, which would otherwise trigger a second call)."""
+        self._cs_resolving = True
+        try:
+            return _resolve_callsign_partial(typed, entry_var, self)
+        finally:
+            self._cs_resolving = False
+
     def _lookup_from(self, focus_next=False):
+        if self._cs_resolving:
+            return
         cs = self.v_from.get().strip().upper()
         self.v_from.set(cs)
         if not cs:
             self.lbl_from.config(text='— enter callsign then press Enter —', fg='#666')
             return
+        cs = self._resolve_callsign(cs, self.v_from)
         name   = lookup_operator(cs)
         city   = lookup_city(cs)
         state  = lookup_state(cs)
@@ -595,21 +694,50 @@ class LogTab(ttk.Frame):
         # Set auto-timestamp when callsign is entered
         if not self.app.session.manual_time and not self.v_time.get():
             self.v_time.set(datetime.now().strftime('%H:%M:%S'))
+        # Refresh D&B if TO is already filled
+        to_cs = self.v_to.get().strip().upper()
+        if to_cs:
+            self._refresh_db_label(cs, to_cs)
         if focus_next:
             self.e_to.focus_set()
             return 'break'
 
+    def _refresh_db_label(self, from_cs: str, to_cs: str):
+        """Recompute and display distance/bearing in lbl_to."""
+        if not to_cs:
+            return
+        s = self.app.session
+        dist = lookup_distance(from_cs, to_cs, self.app.dist_matrix,
+                               ncs_cs=s.ncs_callsign, show_my_db=s.show_my_db)
+        brg  = lookup_bearing(from_cs, to_cs, self.app.bear_matrix,
+                              ncs_cs=s.ncs_callsign, show_my_db=s.show_my_db)
+        name = lookup_operator(to_cs)
+        dist_str = f'{dist:.1f} mi' if isinstance(dist, float) else str(dist)
+        brg_str  = f'{brg:.1f}°'   if isinstance(brg,  float) else str(brg)
+        if name == 'Callsign FROM Not Found':
+            self.lbl_to.config(text=f'✗  {to_cs}   {dist_str}  /  {brg_str}', fg=ERR_RED)
+        else:
+            self.lbl_to.config(text=f'✓  {name}   |   {dist_str}  /  {brg_str}', fg=OK_GRN)
+
     def _lookup_to(self):
+        if self._cs_resolving:
+            return
         cs = self.v_to.get().strip().upper()
         self.v_to.set(cs)
         if not cs:
             self.lbl_to.config(text='')
             return
-        name = lookup_operator(cs)
-        if name == 'Callsign FROM Not Found':
-            self.lbl_to.config(text=f'✗  {cs}', fg=ERR_RED)
-        else:
-            self.lbl_to.config(text=f'✓  {name}', fg=OK_GRN)
+        cs = self._resolve_callsign(cs, self.v_to)
+        from_cs = self.v_from.get().strip().upper()
+        self._refresh_db_label(from_cs, cs)
+
+    def _lookup_dest(self):
+        if self._cs_resolving:
+            return
+        cs = self.v_dest.get().strip().upper()
+        self.v_dest.set(cs)
+        if cs:
+            self._resolve_callsign(cs, self.v_dest)
 
     def _toggle_traffic(self):
         on    = self.v_traffic.get()
@@ -723,6 +851,17 @@ class LogTab(ttk.Frame):
             self._reset_form()
             return
         ci = checkins[idx]
+
+        # Update callsigns and recompute all auto-fields (D&B, operator, city, sector)
+        ci['from_callsign'] = self.v_from.get().strip().upper()
+        ci['to_callsign']   = self.v_to.get().strip().upper()
+        temp = CheckIn(**{k: ci.get(k, v.default if hasattr(v, 'default') else '')
+                          for k, v in CheckIn.__dataclass_fields__.items()})
+        temp.compute_auto_fields(self.app.session,
+                                 self.app.dist_matrix, self.app.bear_matrix)
+        ci.update(temp.__dict__)
+
+        # User-controlled fields always win over the recomputed values
         t = self.v_time.get().strip()
         if t:
             ci['checkin_time'] = t
@@ -799,6 +938,8 @@ class LogTab(ttk.Frame):
         msg = (f'Archive this session ({n} check-in{"s" if n != 1 else ""} across all frequencies) and close?'
                if n else 'Archive empty session and close?')
         if messagebox.askyesno('Archive & Close', msg):
+            if not self.app.session.secured_time:
+                self.app.session.secured_time = datetime.now().strftime('%H%M')
             save_to_archive(self.app.session)
             self.app.set_status('Session archived.')
             self.app.destroy()
@@ -936,6 +1077,9 @@ class SessionTab(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self._vars = {}
+        self._cs_resolving = False
+        self._ncs_entry = None   # set by _build; holds the NCS callsign Entry widget
+        self._freq_combos = {}   # key -> combo widget for the three freq fields
         self._build()
         self.load_from_session()
 
@@ -955,23 +1099,83 @@ class SessionTab(ttk.Frame):
         tk.Label(inner, text='SESSION SETUP', font=FT,
                  fg=HDR_BG).grid(row=0, column=0, columnspan=2, pady=(16, 8))
 
+        _FREQ_KEYS = {'primary_freq', 'alt_freq_1', 'alt_freq_2'}
         for i, (lbl, key, wtype, vals) in enumerate(self._FIELDS, 1):
             tk.Label(inner, text=lbl, font=FA, anchor='e').grid(
                 row=i, column=0, sticky='e', padx=(40, 8), pady=5)
             v = tk.StringVar()
             self._vars[key] = v
             if wtype == 'combo':
+                is_freq = key in _FREQ_KEYS
                 w = ttk.Combobox(inner, textvariable=v, values=vals,
-                                 state='readonly', width=36, font=FA)
+                                 state='normal' if is_freq else 'readonly',
+                                 width=36, font=FA)
+                if is_freq:
+                    self._freq_combos[key] = w
+                    w.bind('<KeyRelease>',
+                           lambda e, _w=w, _v=v: self._freq_keyrelease(_w, _v))
+                    w.bind('<Return>',
+                           lambda e, _w=w, _v=v: self._freq_confirm(_w, _v))
+                    w.bind('<FocusOut>',
+                           lambda e, _w=w, _v=v: _w.after(
+                               150, lambda: self._freq_confirm(_w, _v)))
+                    w.bind('<<ComboboxSelected>>',
+                           lambda e, _w=w: self._freq_selected(_w))
             else:
                 w = tk.Entry(inner, textvariable=v,
                              font=FA, bg=ENTRY_BG, width=38)
             w.grid(row=i, column=1, sticky='w', padx=(0, 40), pady=5)
+            if key == 'ncs_callsign':
+                self._ncs_entry = w
+                w.bind('<Return>',   lambda _: self._lookup_ncs())
+                w.bind('<FocusOut>', lambda _: self._lookup_ncs())
 
         n = len(self._FIELDS) + 1
         tk.Button(inner, text='  Apply Session Settings  ', font=FB,
                   bg=HDR_BG, fg='#FFF', padx=12, pady=5,
                   command=self._apply).grid(row=n, column=0, columnspan=2, pady=20)
+
+    def _lookup_ncs(self):
+        if self._cs_resolving:
+            return
+        v = self._vars['ncs_callsign']
+        typed = v.get().strip().upper()
+        v.set(typed)
+        self._cs_resolving = True
+        try:
+            _resolve_callsign_partial(typed, v, self)
+        finally:
+            self._cs_resolving = False
+
+    def _freq_keyrelease(self, combo, var):
+        """Filter the combobox dropdown list as the user types."""
+        typed = var.get()
+        if not typed:
+            combo['values'] = FREQ_DISPLAY
+            return
+        up = typed.upper()
+        matches = [f for f in FREQ_DISPLAY if up in f.upper()]
+        combo['values'] = matches if matches else FREQ_DISPLAY
+
+    def _freq_confirm(self, combo, var):
+        """On Return / FocusOut: resolve a partial to the unique match, or clear if none."""
+        typed = var.get().strip()
+        if not typed or typed in FREQ_DISPLAY:
+            combo['values'] = FREQ_DISPLAY
+            return
+        up = typed.upper()
+        matches = [f for f in FREQ_DISPLAY if up in f.upper()]
+        if len(matches) == 1:
+            var.set(matches[0])
+            combo['values'] = FREQ_DISPLAY
+        elif not matches:
+            var.set('')
+            combo['values'] = FREQ_DISPLAY
+        # 2+ matches: leave filtered list in place so user can open dropdown to choose
+
+    def _freq_selected(self, combo):
+        """After a dropdown selection, restore the full list for next time."""
+        combo['values'] = FREQ_DISPLAY
 
     def load_from_session(self):
         s = self.app.session
