@@ -731,6 +731,8 @@ class NetSession:
     antenna_1_desc: str = "ICOM AH-710 FOLDED DIPOLE"
     antenna_2_desc: str = "BUSHCOMM SWE-100 BROADBAND SINGLE WIRE END FED"
     ncs_callsign: str = ""
+    station_callsign: str = ""
+    ancs_callsign: str = ""
     show_my_db: bool = False
     manual_time: bool = False
     checkins: list = field(default_factory=list)           # PRIMARY log
@@ -783,7 +785,9 @@ class NetSession:
             'digital_mode': self.digital_mode, 'secured_time': self.secured_time,
             'propagation': self.propagation, 'noise_level': self.noise_level,
             'antenna_1_desc': self.antenna_1_desc, 'antenna_2_desc': self.antenna_2_desc,
-            'ncs_callsign': self.ncs_callsign, 'show_my_db': self.show_my_db,
+            'ncs_callsign': self.ncs_callsign,
+            'station_callsign': self.station_callsign, 'ancs_callsign': self.ancs_callsign,
+            'show_my_db': self.show_my_db,
             'manual_time': self.manual_time,
             'checkins': self.checkins,
             'checkins_alt1': self.checkins_alt1,
@@ -892,7 +896,9 @@ def _init_archive_db(path: str) -> sqlite3.Connection:
             noise_level   TEXT,
             antenna_1_desc TEXT,
             antenna_2_desc TEXT,
-            ncs_callsign  TEXT,
+            ncs_callsign     TEXT,
+            station_callsign TEXT,
+            ancs_callsign    TEXT,
             show_my_db    INTEGER DEFAULT 0,
             manual_time   INTEGER DEFAULT 0,
             archived_at   TEXT
@@ -945,6 +951,14 @@ def _init_archive_db(path: str) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass  # column already exists
 
+    # ── Migrate existing sessions table: add station/ancs callsigns if absent ─
+    for col in ('station_callsign TEXT', 'ancs_callsign TEXT'):
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     # ── Migrate existing JSON archives on first run ───────────────────────────
     if conn.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] == 0:
         if os.path.exists(ARCHIVE_FILE):
@@ -959,8 +973,9 @@ def _init_archive_db(path: str) -> sqlite3.Connection:
                             primary_freq, alt_freq_1, alt_freq_2,
                             digital_mode, secured_time, propagation, noise_level,
                             antenna_1_desc, antenna_2_desc,
-                            ncs_callsign, show_my_db, manual_time, archived_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ncs_callsign, station_callsign, ancs_callsign,
+                            show_my_db, manual_time, archived_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (
                         entry.get('freq_type', ''), entry.get('net_name', ''),
                         entry.get('net_date', ''), entry.get('start_time', ''),
@@ -971,6 +986,7 @@ def _init_archive_db(path: str) -> sqlite3.Connection:
                         entry.get('propagation', ''), entry.get('noise_level', ''),
                         entry.get('antenna_1_desc', ''), entry.get('antenna_2_desc', ''),
                         entry.get('ncs_callsign', ''),
+                        entry.get('station_callsign', ''), entry.get('ancs_callsign', ''),
                         int(bool(entry.get('show_my_db', False))),
                         int(bool(entry.get('manual_time', False))),
                         entry.get('archived_at', ''),
@@ -1009,15 +1025,17 @@ def save_to_archive(session: NetSession):
             primary_freq, alt_freq_1, alt_freq_2,
             digital_mode, secured_time, propagation, noise_level,
             antenna_1_desc, antenna_2_desc,
-            ncs_callsign, show_my_db, manual_time, archived_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ncs_callsign, station_callsign, ancs_callsign,
+            show_my_db, manual_time, archived_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         session.freq_type, session.net_name, session.net_date, session.start_time,
         session.transceiver, session.antenna, session.location,
         session.primary_freq, session.alt_freq_1, session.alt_freq_2,
         session.digital_mode, session.secured_time, session.propagation, session.noise_level,
         session.antenna_1_desc, session.antenna_2_desc,
-        session.ncs_callsign, int(session.show_my_db), int(session.manual_time), archived_at,
+        session.ncs_callsign, session.station_callsign, session.ancs_callsign,
+        int(session.show_my_db), int(session.manual_time), archived_at,
     ))
     session_id = cur.lastrowid
 
@@ -1027,6 +1045,8 @@ def save_to_archive(session: NetSession):
         ('2ND ALT', session.checkins_alt2),
     ]:
         for ci in ci_list:
+            if ci.get('pending'):   # skip NCS auto-entry if never confirmed
+                continue
             _insert_checkin_row(conn, session_id, freq_label, ci)
     conn.commit()
 

@@ -17,7 +17,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 
 from netlog import (
-    NetSession, CheckIn,
+    NetSession, CheckIn, rank_checkins,
     lookup_operator, lookup_city, lookup_state, lookup_sector,
     lookup_coords, find_matching_callsigns,
     lookup_distance, lookup_bearing,
@@ -372,7 +372,7 @@ class LogTab(ttk.Frame):
         info = tk.Frame(hf, bg=HDR_BG)
         info.pack(fill='x', padx=8)
 
-        pairs_r0 = [('Net:','v_net'), ('Date:','v_date'), ('NCS:','v_ncs'), ('Active Freq:','v_active_freq')]
+        pairs_r0 = [('Net:','v_net'), ('Date:','v_date'), ('NCS:','v_ncs'), ('ANCS:','v_ancs'), ('Active Freq:','v_active_freq')]
         pairs_r1 = [('Location:','v_loc'), ('Transceiver:','v_xcvr'), ('Propagation:','v_prop'), ('Noise:','v_noise')]
 
         for row_idx, pairs in enumerate([pairs_r0, pairs_r1]):
@@ -828,6 +828,11 @@ class LogTab(ttk.Frame):
                 active[-1]['distance_miles']  = ''
                 active[-1]['bearing_degrees'] = ''
 
+        # Propagate confirmed station to downstream ALT lists (preserves PRIMARY sequence)
+        active = self.app.session.get_active_checkins()
+        if active:
+            self._propagate_to_alt_lists(active[-1])
+
         self.refresh_table()
         self._reset_form()
         n = len(self.app.session.get_active_checkins())
@@ -865,6 +870,8 @@ class LogTab(ttk.Frame):
         t = self.v_time.get().strip()
         if t:
             ci['checkin_time'] = t
+            if ci.pop('pending', None):   # NCS auto-entry now confirmed
+                rank_checkins(self.app.session.get_active_checkins())
         ci['propagation']         = self.v_checkin_prop.get().strip()
         has_traf                  = self.v_traffic.get()
         ci['has_traffic']         = has_traf
@@ -995,24 +1002,74 @@ class LogTab(ttk.Frame):
                     '', '',
                 ))
 
-        # ── Confirmed check-ins for this frequency ───────────────────────────
+        # ── Confirmed check-ins (and pending NCS auto-entry) for this frequency ─
         for i, ci in enumerate(s.get_active_checkins()):
             sig  = ' '.join(c for c in SIG_CODES if ci.get(f'signal_{c}'))
             dist = ci.get('distance_miles', '')
             brg  = ci.get('bearing_degrees', '')
             ds   = f'{dist:.1f}' if isinstance(dist, float) else str(dist)[:8]
             bs   = f'{brg:.1f}°' if isinstance(brg,  float) else str(brg)[:7]
-            tag  = 'evn' if i % 2 else 'odd'
+            is_ncs_pending = ci.get('pending', False)
+            tag      = 'pending' if is_ncs_pending else ('evn' if i % 2 else 'odd')
+            time_val = '— pending —' if is_ncs_pending else ci.get('checkin_time', '')
             self.tree.insert('', 'end', iid=f'a:{i}', tag=tag, values=(
                 ci.get('checkin_order', ''),
                 ci.get('from_callsign', ''),
                 ci.get('from_operator', ''),
                 ci.get('to_callsign', ''),
-                ci.get('checkin_time', ''),
+                time_val,
                 sig, ci.get('city', ''), ci.get('state', ''),
                 ci.get('sector', ''), ds, bs,
             ))
         self._refresh_counts()
+
+    def _propagate_to_alt_lists(self, ci_dict: dict):
+        """When a station is confirmed on the current frequency, pre-insert a
+        pending placeholder into downstream ALT frequency lists so the same
+        sequence of stations appears across all three frequencies."""
+        s  = self.app.session
+        cs = ci_dict.get('from_callsign', '').upper()
+        if not cs:
+            return
+        if s.freq_type == 'PRIMARY':
+            targets = [s.checkins_alt1, s.checkins_alt2]
+        elif s.freq_type == '1ST ALT':
+            targets = [s.checkins_alt2]
+        else:
+            return
+        for lst in targets:
+            if any(ci.get('from_callsign', '').upper() == cs for ci in lst):
+                continue
+            ci_obj = CheckIn(from_callsign=cs)
+            ci_obj.compute_auto_fields(s, self.app.dist_matrix, self.app.bear_matrix)
+            pending_dict = ci_obj.__dict__.copy()
+            pending_dict['pending'] = True
+            pending_dict['checkin_time'] = ''
+            lst.append(pending_dict)
+
+    def _ensure_ncs_pending(self):
+        """Insert a pending (no-time) NCS check-in at position 0 of each
+        frequency list so the operator must select it to confirm the time."""
+        s = self.app.session
+        ncs_cs = (s.ncs_callsign or '').strip().upper()
+        if not ncs_cs:
+            return
+        for lst in [s.checkins, s.checkins_alt1, s.checkins_alt2]:
+            # If NCS is already confirmed on this frequency, leave it alone
+            if any(ci.get('from_callsign', '').upper() == ncs_cs and ci.get('checkin_time')
+                   for ci in lst):
+                continue
+            # Remove any stale pending NCS entry (handles callsign changes)
+            lst[:] = [ci for ci in lst
+                      if not (ci.get('pending') and
+                              ci.get('from_callsign', '').upper() == ncs_cs)]
+            # Build a fresh pending entry
+            ci_obj = CheckIn(from_callsign=ncs_cs)
+            ci_obj.compute_auto_fields(s, self.app.dist_matrix, self.app.bear_matrix)
+            ci_dict = ci_obj.__dict__.copy()
+            ci_dict['pending'] = True
+            ci_dict['checkin_time'] = ''
+            lst.insert(0, ci_dict)
 
     def _refresh_counts(self):
         c = self.app.session.sector_counts
@@ -1022,10 +1079,11 @@ class LogTab(ttk.Frame):
 
     def update_session_display(self):
         s = self.app.session
-        self.v_net.set(s.net_name     or '—')
-        self.v_date.set(s.net_date    or '—')
-        self.v_ncs.set(s.ncs_callsign or '—')
-        self.v_loc.set(s.location     or '—')
+        self.v_net.set(s.net_name      or '—')
+        self.v_date.set(s.net_date     or '—')
+        self.v_ncs.set(s.ncs_callsign  or '—')
+        self.v_ancs.set(s.ancs_callsign or '—')
+        self.v_loc.set(s.location      or '—')
         self.v_xcvr.set(s.transceiver or '—')
         self.v_prop.set(s.propagation or '—')
         self.v_noise.set(s.noise_level or '—')
@@ -1046,6 +1104,7 @@ class LogTab(ttk.Frame):
         # Keep propagation default in sync with session setting
         if not self.v_checkin_prop.get():
             self.v_checkin_prop.set(s.propagation or '')
+        self._ensure_ncs_pending()
         self.refresh_table()
 
 
@@ -1055,11 +1114,13 @@ class LogTab(ttk.Frame):
 class SessionTab(ttk.Frame):
 
     _FIELDS = [
-        ('Net Name:',           'net_name',       'combo', NET_NAMES),
-        ('Net Date:',           'net_date',        'entry', None),
-        ('Start Time (HHMM):',  'start_time',      'entry', None),
-        ('NCS Callsign:',       'ncs_callsign',    'entry', None),
-        ('Transceiver:',        'transceiver',     'combo', TRANSCEIVERS),
+        ('Net Name:',           'net_name',          'combo', NET_NAMES),
+        ('Net Date:',           'net_date',           'entry', None),
+        ('Start Time (HHMM):',  'start_time',         'entry', None),
+        ('Station Callsign:',   'station_callsign',   'entry', None),
+        ('NCS Callsign:',       'ncs_callsign',       'entry', None),
+        ('ANCS Callsign:',      'ancs_callsign',      'entry', None),
+        ('Transceiver:',        'transceiver',        'combo', TRANSCEIVERS),
         ('Antenna:',            'antenna',         'combo', ANTENNAS),
         ('Location:',           'location',        'combo', LOCATIONS),
         ('Primary Freq:',       'primary_freq',    'combo', FREQ_DISPLAY),
@@ -1078,7 +1139,7 @@ class SessionTab(ttk.Frame):
         self.app = app
         self._vars = {}
         self._cs_resolving = False
-        self._ncs_entry = None   # set by _build; holds the NCS callsign Entry widget
+        self._cs_entries = {}    # key -> Entry widget for callsign fields
         self._freq_combos = {}   # key -> combo widget for the three freq fields
         self._build()
         self.load_from_session()
@@ -1100,6 +1161,7 @@ class SessionTab(ttk.Frame):
                  fg=HDR_BG).grid(row=0, column=0, columnspan=2, pady=(16, 8))
 
         _FREQ_KEYS = {'primary_freq', 'alt_freq_1', 'alt_freq_2'}
+        _CS_KEYS   = {'ncs_callsign', 'station_callsign', 'ancs_callsign'}
         for i, (lbl, key, wtype, vals) in enumerate(self._FIELDS, 1):
             tk.Label(inner, text=lbl, font=FA, anchor='e').grid(
                 row=i, column=0, sticky='e', padx=(40, 8), pady=5)
@@ -1125,20 +1187,20 @@ class SessionTab(ttk.Frame):
                 w = tk.Entry(inner, textvariable=v,
                              font=FA, bg=ENTRY_BG, width=38)
             w.grid(row=i, column=1, sticky='w', padx=(0, 40), pady=5)
-            if key == 'ncs_callsign':
-                self._ncs_entry = w
-                w.bind('<Return>',   lambda _: self._lookup_ncs())
-                w.bind('<FocusOut>', lambda _: self._lookup_ncs())
+            if key in _CS_KEYS:
+                self._cs_entries[key] = w
+                w.bind('<Return>',   lambda _, _k=key: self._lookup_session_cs(_k))
+                w.bind('<FocusOut>', lambda _, _k=key: self._lookup_session_cs(_k))
 
         n = len(self._FIELDS) + 1
         tk.Button(inner, text='  Apply Session Settings  ', font=FB,
                   bg=HDR_BG, fg='#FFF', padx=12, pady=5,
                   command=self._apply).grid(row=n, column=0, columnspan=2, pady=20)
 
-    def _lookup_ncs(self):
+    def _lookup_session_cs(self, key: str):
         if self._cs_resolving:
             return
-        v = self._vars['ncs_callsign']
+        v = self._vars[key]
         typed = v.get().strip().upper()
         v.set(typed)
         self._cs_resolving = True
