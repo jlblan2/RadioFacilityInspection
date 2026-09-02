@@ -7,6 +7,7 @@ Usage:
     python meshtastic_gui.py
 """
 
+import base64
 import os
 import queue
 import sys
@@ -21,6 +22,7 @@ sys.path.insert(0, BASE)
 from mesh_client import (
     MeshClient, list_serial_ports, scan_ble, node_display_name, strip_ansi,
     BROADCAST_ADDR, ROLE_OPTIONS, REGION_OPTIONS,
+    PSK_MODES, describe_psk, encode_psk,
 )
 import firmware as fw
 
@@ -89,6 +91,106 @@ def format_battery(battery_level, voltage) -> str:
     return f"{battery_level}%{volt_str}"
 
 
+class ChannelDialog(tk.Toplevel):
+    """Modal dialog for adding a new channel or editing an existing one."""
+
+    def __init__(self, parent, index: int, existing, on_save):
+        super().__init__(parent)
+        self.title(f"{'Edit' if existing else 'Add'} Channel {index}")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self.on_save = on_save
+        self.is_new = existing is None
+
+        pad = dict(padx=8, pady=6)
+        row = 0
+
+        tk.Label(self, text="Name:", font=FA).grid(row=row, column=0, sticky="w", **pad)
+        self.name_entry = tk.Entry(self, font=FA, width=24)
+        self.name_entry.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
+        tk.Label(self, text="Encryption:", font=FA).grid(row=row, column=0, sticky="w", **pad)
+        self.psk_mode = ttk.Combobox(self, font=FA, width=12, state="readonly", values=PSK_MODES)
+        self.psk_mode.grid(row=row, column=1, sticky="w", **pad)
+        self.psk_mode.bind("<<ComboboxSelected>>", self._on_psk_mode_change)
+        row += 1
+
+        tk.Label(self, text="Custom PSK (base64):", font=FA).grid(row=row, column=0, sticky="w", **pad)
+        self.psk_entry = tk.Entry(self, font=FA, width=34)
+        self.psk_entry.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
+        self.uplink_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(self, text="Uplink Enabled", font=FA, variable=self.uplink_var).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=8)
+        row += 1
+        self.downlink_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(self, text="Downlink Enabled", font=FA, variable=self.downlink_var).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=8)
+        row += 1
+        self.muted_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(self, text="Muted", font=FA, variable=self.muted_var).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=8)
+        row += 1
+
+        tk.Label(self, text="Position Precision (bits):", font=FA).grid(row=row, column=0, sticky="w", **pad)
+        self.precision_entry = tk.Entry(self, font=FA, width=10)
+        self.precision_entry.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
+        if existing:
+            self.name_entry.insert(0, existing["name"])
+            mode = describe_psk(existing["psk"])
+            self.psk_mode.set(mode)
+            if mode == "Custom":
+                self.psk_entry.insert(0, base64.b64encode(existing["psk"]).decode())
+            self.uplink_var.set(existing["uplink_enabled"])
+            self.downlink_var.set(existing["downlink_enabled"])
+            self.muted_var.set(existing["is_muted"])
+            self.precision_entry.insert(0, str(existing["position_precision"]))
+        else:
+            self.psk_mode.set("Default")
+            self.precision_entry.insert(0, "32")
+        self._on_psk_mode_change()
+
+        btns = tk.Frame(self)
+        btns.grid(row=row, column=0, columnspan=2, pady=10)
+        tk.Button(btns, text="Save", font=FB, bg="#2E7D32", fg="white", padx=14,
+                   command=self._on_save).pack(side="left", padx=6)
+        tk.Button(btns, text="Cancel", font=FA, padx=14, command=self.destroy).pack(side="left", padx=6)
+
+    def _on_psk_mode_change(self, _event=None):
+        self.psk_entry.config(state="normal" if self.psk_mode.get() == "Custom" else "disabled")
+
+    def _on_save(self):
+        name = self.name_entry.get().strip()
+        if self.is_new and not name:
+            messagebox.showwarning("Missing Name", "Enter a channel name.", parent=self)
+            return
+        try:
+            psk = encode_psk(self.psk_mode.get(), self.psk_entry.get().strip())
+        except ValueError as exc:
+            messagebox.showerror("Invalid PSK", str(exc), parent=self)
+            return
+        try:
+            precision = int(self.precision_entry.get().strip() or 0)
+        except ValueError:
+            messagebox.showerror("Invalid Value", "Position Precision must be numeric.", parent=self)
+            return
+        self.on_save({
+            "name": name,
+            "psk": psk,
+            "uplink_enabled": self.uplink_var.get(),
+            "downlink_enabled": self.downlink_var.get(),
+            "position_precision": precision,
+            "is_muted": self.muted_var.get(),
+        })
+        self.destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -106,6 +208,8 @@ class App(tk.Tk):
         self.fw_path = None
 
         self.ble_queue: "queue.Queue" = queue.Queue()
+
+        self._channels_cache: dict = {}
 
         self._closing = False
 
@@ -462,6 +566,32 @@ class App(tk.Tk):
                                                 padx=14, command=self._load_settings_fields, state="disabled")
         self.btn_discard_settings.pack(side="left", padx=8)
 
+        chans = tk.LabelFrame(f, text="Channels", font=FB)
+        chans.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        chan_btns = tk.Frame(chans)
+        chan_btns.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Button(chan_btns, text="Refresh", font=FA, command=self._refresh_channels).pack(side="left")
+        self.btn_add_channel = tk.Button(chan_btns, text="Add", font=FA,
+                                           command=self._add_channel, state="disabled")
+        self.btn_add_channel.pack(side="left", padx=6)
+        self.btn_edit_channel = tk.Button(chan_btns, text="Edit", font=FA,
+                                            command=self._edit_channel, state="disabled")
+        self.btn_edit_channel.pack(side="left", padx=6)
+        self.btn_delete_channel = tk.Button(chan_btns, text="Delete", font=FA, bg="#B71C1C", fg="white",
+                                              command=self._delete_channel, state="disabled")
+        self.btn_delete_channel.pack(side="left", padx=6)
+
+        cols = ("index", "role", "name", "encryption", "uplink", "downlink", "precision", "muted")
+        headers = {"index": "#", "role": "Role", "name": "Name", "encryption": "Encryption",
+                   "uplink": "Uplink", "downlink": "Downlink", "precision": "Precision", "muted": "Muted"}
+        self.channel_tree = ttk.Treeview(chans, columns=cols, show="headings", height=8)
+        for c in cols:
+            self.channel_tree.heading(c, text=headers[c])
+            self.channel_tree.column(c, width=130 if c == "name" else 80, anchor="w")
+        self.channel_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.channel_tree.bind("<<TreeviewSelect>>", self._on_channel_select)
+
         danger = tk.LabelFrame(f, text="Factory Reset", font=FB, fg=ERR_RED)
         danger.pack(fill="x", padx=8, pady=8)
         tk.Label(danger, text="Wipes device config and NodeDB back to defaults. Firmware is not touched.",
@@ -523,6 +653,81 @@ class App(tk.Tk):
             return
         self.client.factory_reset(full=full)
         self.status_var.set("Factory reset requested…")
+
+    # ── Channels (within the Settings tab) ──────────────────────────────
+    def _refresh_channels(self):
+        if not self.client.is_connected():
+            return
+        try:
+            channels = self.client.get_channels()
+        except Exception as exc:
+            messagebox.showerror("Channels", f"Could not read channels: {exc}")
+            return
+        self._channels_cache = {c["index"]: c for c in channels}
+        for row in self.channel_tree.get_children():
+            self.channel_tree.delete(row)
+        for c in channels:
+            self.channel_tree.insert("", "end", iid=str(c["index"]), values=(
+                c["index"], c["role"], c["name"] or "—", describe_psk(c["psk"]),
+                "Yes" if c["uplink_enabled"] else "No",
+                "Yes" if c["downlink_enabled"] else "No",
+                c["position_precision"], "Yes" if c["is_muted"] else "No",
+            ))
+        self.btn_add_channel.config(state="normal")
+        self._on_channel_select()
+
+    def _on_channel_select(self, _event=None):
+        sel = self.channel_tree.selection()
+        if not sel:
+            self.btn_edit_channel.config(state="disabled")
+            self.btn_delete_channel.config(state="disabled")
+            return
+        role = self._channels_cache.get(int(sel[0]), {}).get("role")
+        self.btn_edit_channel.config(state="normal" if role in ("PRIMARY", "SECONDARY") else "disabled")
+        self.btn_delete_channel.config(state="normal" if role == "SECONDARY" else "disabled")
+
+    def _add_channel(self):
+        free = next((c["index"] for c in self._channels_cache.values() if c["role"] == "DISABLED"), None)
+        if free is None:
+            messagebox.showwarning("Channels", "All 8 channel slots are already in use.")
+            return
+        ChannelDialog(self, free, None, lambda data: self._do_save_channel(free, data, role="SECONDARY"))
+
+    def _edit_channel(self):
+        sel = self.channel_tree.selection()
+        if not sel:
+            return
+        index = int(sel[0])
+        existing = self._channels_cache.get(index)
+        if not existing:
+            return
+        ChannelDialog(self, index, existing, lambda data: self._do_save_channel(index, data, role=None))
+
+    def _do_save_channel(self, index: int, data: dict, role):
+        if not messagebox.askyesno("Confirm Save",
+                                    "Write this channel to the device? It may reboot to apply it."):
+            return
+        self.client.save_channel(
+            index, data["name"], data["psk"], data["uplink_enabled"], data["downlink_enabled"],
+            data["position_precision"], data["is_muted"], role=role,
+        )
+        self.status_var.set("Saving channel…")
+
+    def _delete_channel(self):
+        sel = self.channel_tree.selection()
+        if not sel:
+            return
+        index = int(sel[0])
+        name = self._channels_cache.get(index, {}).get("name") or f"slot {index}"
+        if not messagebox.askyesno("Confirm Delete", f"Delete channel '{name}'? This cannot be undone.",
+                                    icon="warning"):
+            return
+        try:
+            self.client.delete_channel(index)
+        except Exception as exc:
+            messagebox.showerror("Delete Failed", str(exc))
+            return
+        self.status_var.set("Deleting channel…")
 
     # ── Firmware tab ─────────────────────────────────────────────────────
     def _build_firmware_tab(self):
@@ -1025,6 +1230,7 @@ class App(tk.Tk):
             self.after(500, self._load_settings_fields)
             self.after(500, self._refresh_battery)
             self.after(500, self._load_mqtt_fields)
+            self.after(500, self._refresh_channels)
             self.fw_current_var.set(
                 f"{payload['long_name']}  |  {payload['hw_model']}  |  "
                 f"firmware {payload['firmware']}  |  board {payload.get('pio_env', '?')}"
@@ -1055,6 +1261,12 @@ class App(tk.Tk):
             self.btn_discard_settings.config(state="disabled")
             self.btn_save_mqtt.config(state="disabled")
             self.btn_discard_mqtt.config(state="disabled")
+            self._channels_cache = {}
+            for row in self.channel_tree.get_children():
+                self.channel_tree.delete(row)
+            self.btn_add_channel.config(state="disabled")
+            self.btn_edit_channel.config(state="disabled")
+            self.btn_delete_channel.config(state="disabled")
 
         elif kind == "error":
             self.status_var.set(f"Error: {payload}")
@@ -1075,6 +1287,16 @@ class App(tk.Tk):
             self.btn_save_mqtt.config(state="normal")
             self._append_log("MQTT settings saved")
             messagebox.showinfo("MQTT", "MQTT settings saved to device.")
+
+        elif kind == "channel_saved":
+            self.status_var.set(f"Channel {payload} saved")
+            self._append_log(f"Channel {payload} saved")
+            self._refresh_channels()
+
+        elif kind == "channel_deleted":
+            self.status_var.set(f"Channel {payload} deleted")
+            self._append_log(f"Channel {payload} deleted")
+            self._refresh_channels()
 
         elif kind == "factory_reset_done":
             self.status_var.set("Factory reset complete — device will reboot")

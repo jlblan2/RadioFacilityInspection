@@ -9,6 +9,7 @@ meshtastic library invokes pubsub callbacks from its own background
 threads, never from the caller's thread.
 """
 
+import base64
 import queue
 import re
 import threading
@@ -21,12 +22,44 @@ import meshtastic.serial_interface
 import meshtastic.tcp_interface
 import meshtastic.ble_interface
 import meshtastic.util
-from meshtastic.protobuf import config_pb2
+from meshtastic.protobuf import channel_pb2, config_pb2
+from meshtastic.util import genPSK256
 
 BROADCAST_ADDR = "^all"
 
 ROLE_OPTIONS = list(config_pb2.Config.DeviceConfig.Role.keys())
 REGION_OPTIONS = list(config_pb2.Config.LoRaConfig.RegionCode.keys())
+
+CHANNEL_ROLE_NAMES = list(channel_pb2.Channel.Role.keys())  # DISABLED, PRIMARY, SECONDARY
+PSK_MODES = ["None", "Default", "Random", "Custom"]
+
+_PSK_NONE = bytes([0])
+_PSK_DEFAULT = bytes([1])
+
+
+def describe_psk(psk: bytes) -> str:
+    """Which PSK_MODES bucket an existing channel's raw PSK bytes fall into."""
+    if not psk or psk == _PSK_NONE:
+        return "None"
+    if psk == _PSK_DEFAULT:
+        return "Default"
+    return "Custom"
+
+
+def encode_psk(mode: str, custom_b64: str = "") -> bytes:
+    """Inverse of describe_psk(), for writing a channel's PSK from the UI."""
+    if mode == "None":
+        return _PSK_NONE
+    if mode == "Default":
+        return _PSK_DEFAULT
+    if mode == "Random":
+        return genPSK256()
+    if mode == "Custom":
+        try:
+            return base64.b64decode(custom_b64, validate=True)
+        except Exception as exc:
+            raise ValueError(f"Invalid base64 PSK: {exc}") from exc
+    raise ValueError(f"Unknown PSK mode: {mode}")
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
@@ -73,6 +106,8 @@ class MeshClient:
       'packet'       -> dict (raw packet, for anything not handled above)
       'settings_saved'    -> None
       'mqtt_saved'        -> None
+      'channel_saved'     -> int (channel index)
+      'channel_deleted'   -> int (channel index)
       'factory_reset_done' -> None
       'telemetry'    -> {'node_id','battery_level','voltage'}
     """
@@ -258,6 +293,80 @@ class MeshClient:
                 self.events.put(("error", f"Save MQTT settings failed: {exc}"))
 
         threading.Thread(target=worker, daemon=True, name="mesh-save-mqtt").start()
+
+    # ── channels ─────────────────────────────────────────────────────────
+    def get_channels(self) -> list:
+        """All 8 channel slots (some may be DISABLED/empty), read from the
+        device's already-synced channel list (populated during connect)."""
+        if self.interface is None:
+            raise RuntimeError("Not connected")
+        result = []
+        for ch in self.interface.localNode.channels:
+            s = ch.settings
+            result.append({
+                "index": ch.index,
+                "role": channel_pb2.Channel.Role.Name(ch.role),
+                "name": s.name,
+                "psk": bytes(s.psk),
+                "uplink_enabled": s.uplink_enabled,
+                "downlink_enabled": s.downlink_enabled,
+                "position_precision": s.module_settings.position_precision,
+                "is_muted": s.module_settings.is_muted,
+            })
+        return result
+
+    def save_channel(self, index: int, name: str, psk: bytes, uplink_enabled: bool,
+                      downlink_enabled: bool, position_precision: int, is_muted: bool,
+                      role: str = None):
+        """
+        Write one channel slot to the device. Pass role="SECONDARY" only when
+        turning a DISABLED slot into a new channel — leave it None to edit an
+        existing PRIMARY/SECONDARY channel's settings without touching its role.
+        Runs on a background thread; reports 'channel_saved' or 'error'.
+        """
+        if self.interface is None:
+            raise RuntimeError("Not connected")
+        node = self.interface.localNode
+
+        def worker():
+            try:
+                ch = node.channels[index]
+                if role is not None:
+                    ch.role = channel_pb2.Channel.Role.Value(role)
+                ch.settings.name = name
+                ch.settings.psk = psk
+                ch.settings.uplink_enabled = uplink_enabled
+                ch.settings.downlink_enabled = downlink_enabled
+                ch.settings.module_settings.position_precision = position_precision
+                ch.settings.module_settings.is_muted = is_muted
+                node.writeChannel(index)
+                self.events.put(("channel_saved", index))
+            except Exception as exc:
+                self.events.put(("error", f"Save channel failed: {exc}"))
+
+        threading.Thread(target=worker, daemon=True, name="mesh-save-channel").start()
+
+    def delete_channel(self, index: int):
+        """
+        Delete a SECONDARY channel (shifts higher slots down). The underlying
+        library hard-exits the whole process if asked to delete a non-SECONDARY
+        channel, so that's checked here first and raised as a normal error instead.
+        """
+        if self.interface is None:
+            raise RuntimeError("Not connected")
+        node = self.interface.localNode
+        role = channel_pb2.Channel.Role.Name(node.channels[index].role)
+        if role != "SECONDARY":
+            raise RuntimeError(f"Only SECONDARY channels can be deleted (slot {index} is {role})")
+
+        def worker():
+            try:
+                node.deleteChannel(index)
+                self.events.put(("channel_deleted", index))
+            except Exception as exc:
+                self.events.put(("error", f"Delete channel failed: {exc}"))
+
+        threading.Thread(target=worker, daemon=True, name="mesh-delete-channel").start()
 
     def factory_reset(self, full: bool = False):
         """Wipe device config/NodeDB back to defaults. Does NOT touch firmware."""
