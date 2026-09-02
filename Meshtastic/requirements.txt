@@ -1,0 +1,13 @@
+meshtastic>=2.7.0
+
+# Makes the firmware-update HTTPS calls trust the same certificate store as
+# the OS (Windows/macOS/Linux) instead of the bundled certifi CA list. Needed
+# because some security software does HTTPS inspection with a root cert that
+# Windows trusts but certifi doesn't ship, which otherwise breaks every HTTPS
+# request in the Firmware tab with CERTIFICATE_VERIFY_FAILED.
+truststore
+
+# Optional: only needed to flash ESP32-family devices from the Firmware tab
+# (nRF52/RP2040/RP2350 boards flash via UF2 drag-and-drop instead, no extra
+# dependency required).
+esptool
