@@ -471,8 +471,9 @@ class LogTab(ttk.Frame):
         self.tree.tag_configure('evn',     background=ROW_EVN)
         self.tree.tag_configure('pending', background='#D4DCF0', foreground='#5060A0')
 
-        # Left-click → populate time field; right-click → context menu
+        # Left-click → edit; Delete key or right-click → delete; right-click → menu
         self.tree.bind('<<TreeviewSelect>>', self._on_checkin_select)
+        self.tree.bind('<Delete>', lambda _: self._delete_checkin())
         self._tree_menu = tk.Menu(self, tearoff=0)
         self._tree_menu.add_command(label='Delete selected check-in', command=self._delete_checkin)
         self.tree.bind('<Button-3>', self._show_tree_menu)
@@ -594,6 +595,10 @@ class LogTab(ttk.Frame):
         self._btn_main.pack(side='left', padx=8)
         tk.Button(bf, text='Reset Form', font=FA, padx=6,
                   command=self._reset_form).pack(side='left', padx=4)
+        self._btn_del = tk.Button(bf, text='Delete Check-In', font=FA, padx=6,
+                                  bg='#8B0000', fg='#FFF',
+                                  command=self._delete_checkin, state='disabled')
+        self._btn_del.pack(side='left', padx=4)
 
     # ── Event handlers ────────────────────────────────────────────────────────
     def _on_checkin_select(self, _event=None):
@@ -658,10 +663,11 @@ class LogTab(ttk.Frame):
             self.e_dest.config(state=dest_state, bg=dest_bg)
             # Notes always editable for an existing check-in
             self.e_notes.config(state='normal', bg=ENTRY_BG)
-            # Switch button to UPDATE mode
+            # Switch button to UPDATE mode and enable Delete
             self._editing_idx = idx
             self._btn_main.config(text='  UPDATE CHECK-IN  ',
                                   bg='#2A6099', command=self._do_update)
+            self._btn_del.config(state='normal')
 
     def _resolve_callsign(self, typed: str, entry_var: tk.StringVar) -> str:
         """Wraps _resolve_callsign_partial with a re-entrancy guard (FocusOut fires
@@ -707,10 +713,11 @@ class LogTab(ttk.Frame):
         if not to_cs:
             return
         s = self.app.session
+        my_cs = (s.station_callsign or s.ncs_callsign or '').strip().upper()
         dist = lookup_distance(from_cs, to_cs, self.app.dist_matrix,
-                               ncs_cs=s.ncs_callsign, show_my_db=s.show_my_db)
+                               ncs_cs=my_cs, show_my_db=s.show_my_db)
         brg  = lookup_bearing(from_cs, to_cs, self.app.bear_matrix,
-                              ncs_cs=s.ncs_callsign, show_my_db=s.show_my_db)
+                              ncs_cs=my_cs, show_my_db=s.show_my_db)
         name = lookup_operator(to_cs)
         dist_str = f'{dist:.1f} mi' if isinstance(dist, float) else str(dist)
         brg_str  = f'{brg:.1f}°'   if isinstance(brg,  float) else str(brg)
@@ -772,6 +779,7 @@ class LogTab(ttk.Frame):
             self.v_active_freq.set(s.alt_freq_1 or '—')
         else:
             self.v_active_freq.set(s.alt_freq_2 or '—')
+        self._ensure_ncs_pending()  # guarantee NCS is first on every tab switch
         self.refresh_table()   # load this frequency's check-in list
         n = len(s.get_active_checkins())
         self.app.set_status(f'Active frequency: {ft}  |  {n} check-in{"s" if n != 1 else ""} on this frequency')
@@ -845,6 +853,7 @@ class LogTab(ttk.Frame):
         self._editing_idx = None
         self._btn_main.config(text='  ADD CHECK-IN  ',
                               bg=HDR_BG, command=self._do_add)
+        self._btn_del.config(state='disabled')
 
     def _do_update(self):
         """Write edited form fields back to the selected check-in (no new row)."""
@@ -917,16 +926,38 @@ class LogTab(ttk.Frame):
                 'This station has not yet checked in on this frequency.\n'
                 'Click the row to pre-fill the form, then log their check-in.')
             return
-        idx = int(iid[2:])   # 'a:0' → 0
-        lst = self.app.session.get_active_checkins()
+        idx = int(iid[2:])
+        s   = self.app.session
+        lst = s.get_active_checkins()
+        if idx >= len(lst):
+            return
         ci  = lst[idx]
         cs  = ci.get('from_callsign', '?')
-        if messagebox.askyesno('Delete Check-In', f'Remove check-in for {cs}?'):
-            del lst[idx]
-            from netlog import rank_checkins
-            rank_checkins(lst)
-            self.refresh_table()
-            self.app.set_status(f'Check-in for {cs} removed.')
+        label = '(pending) ' if ci.get('pending') else ''
+        if not messagebox.askyesno('Delete Check-In',
+                                   f'Remove {label}check-in for  {cs}?'):
+            return
+
+        del lst[idx]
+        rank_checkins(lst)
+
+        # Cascade: remove pending placeholders for this station from downstream ALT lists
+        freq = s.freq_type
+        if freq == 'PRIMARY':
+            cascade = [s.checkins_alt1, s.checkins_alt2]
+        elif freq == '1ST ALT':
+            cascade = [s.checkins_alt2]
+        else:
+            cascade = []
+        for alt_lst in cascade:
+            alt_lst[:] = [c for c in alt_lst
+                          if not (c.get('pending') and
+                                  c.get('from_callsign', '').upper() == cs.upper())]
+
+        self._set_add_mode()
+        self._ensure_ncs_pending()   # re-pin NCS if it was the deleted entry
+        self.refresh_table()
+        self.app.set_status(f'Check-in for {cs} removed.')
 
     def _edit_session(self):
         self.app.notebook.select(1)
@@ -1048,28 +1079,32 @@ class LogTab(ttk.Frame):
             lst.append(pending_dict)
 
     def _ensure_ncs_pending(self):
-        """Insert a pending (no-time) NCS check-in at position 0 of each
-        frequency list so the operator must select it to confirm the time."""
+        """Guarantee the NCS callsign is always position 0 on every frequency list.
+
+        Three cases per list:
+          • NCS not present at all  → insert pending entry at front
+          • NCS present but not first → move that entry (confirmed or pending) to front
+          • NCS already first        → nothing to do
+        """
         s = self.app.session
         ncs_cs = (s.ncs_callsign or '').strip().upper()
         if not ncs_cs:
             return
         for lst in [s.checkins, s.checkins_alt1, s.checkins_alt2]:
-            # If NCS is already confirmed on this frequency, leave it alone
-            if any(ci.get('from_callsign', '').upper() == ncs_cs and ci.get('checkin_time')
-                   for ci in lst):
-                continue
-            # Remove any stale pending NCS entry (handles callsign changes)
-            lst[:] = [ci for ci in lst
-                      if not (ci.get('pending') and
-                              ci.get('from_callsign', '').upper() == ncs_cs)]
-            # Build a fresh pending entry
-            ci_obj = CheckIn(from_callsign=ncs_cs)
-            ci_obj.compute_auto_fields(s, self.app.dist_matrix, self.app.bear_matrix)
-            ci_dict = ci_obj.__dict__.copy()
-            ci_dict['pending'] = True
-            ci_dict['checkin_time'] = ''
-            lst.insert(0, ci_dict)
+            ncs_indices = [i for i, ci in enumerate(lst)
+                           if ci.get('from_callsign', '').upper() == ncs_cs]
+            if not ncs_indices:
+                # NCS is absent — insert a pending placeholder at the front
+                ci_obj = CheckIn(from_callsign=ncs_cs)
+                ci_obj.compute_auto_fields(s, self.app.dist_matrix, self.app.bear_matrix)
+                ci_dict = ci_obj.__dict__.copy()
+                ci_dict['pending'] = True
+                ci_dict['checkin_time'] = ''
+                lst.insert(0, ci_dict)
+            elif ncs_indices[0] != 0:
+                # NCS is somewhere in the list but not first — move it to front
+                lst.insert(0, lst.pop(ncs_indices[0]))
+            # else: NCS is already at position 0 — nothing to do
 
     def _refresh_counts(self):
         c = self.app.session.sector_counts
@@ -2357,6 +2392,390 @@ class LoginDialog(tk.Frame):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Popup calendar date-picker (no third-party dependency)
+# ─────────────────────────────────────────────────────────────────────────────
+class _DatePickerButton(tk.Frame):
+    """Button that opens a month-grid popup and exposes a .date property."""
+
+    _MON = ['January','February','March','April','May','June',
+            'July','August','September','October','November','December']
+
+    def __init__(self, parent, initial_date, on_change=None, **kw):
+        super().__init__(parent, **kw)
+        self._date     = initial_date
+        self._on_change = on_change
+        self._popup    = None
+        self._btn = tk.Button(self, text=str(initial_date), font=FA,
+                              bg=ENTRY_BG, relief='groove', width=12,
+                              command=self._toggle)
+        self._btn.pack()
+
+    @property
+    def date(self):
+        return self._date
+
+    def set_date(self, d):
+        self._date = d
+        self._btn.config(text=str(d))
+
+    def _toggle(self):
+        if self._popup and self._popup.winfo_exists():
+            self._popup.destroy()
+            self._popup = None
+        else:
+            self._open()
+
+    def _open(self):
+        import calendar as _cal
+        popup = tk.Toplevel(self)
+        popup.title('')
+        popup.resizable(False, False)
+        popup.transient(self.winfo_toplevel())
+        popup.grab_set()
+        self._popup = popup
+
+        self.update_idletasks()
+        bx = self._btn.winfo_rootx()
+        by = self._btn.winfo_rooty() + self._btn.winfo_height() + 2
+        popup.geometry(f'+{bx}+{by}')
+
+        vy = [self._date.year]
+        vm = [self._date.month]
+        body = tk.Frame(popup, bg='#EBEBEB', padx=4, pady=4)
+        body.pack()
+
+        def draw():
+            for w in body.winfo_children():
+                w.destroy()
+
+            # Navigation row
+            nav = tk.Frame(body, bg='#EBEBEB')
+            nav.pack(fill='x', pady=(0, 2))
+            tk.Button(nav, text=' < ', font=FS, relief='flat',
+                      command=prev_m).pack(side='left')
+            tk.Label(nav, text=f'{self._MON[vm[0]-1]} {vy[0]}',
+                     font=FB, bg='#EBEBEB', width=17).pack(side='left', expand=True)
+            tk.Button(nav, text=' > ', font=FS, relief='flat',
+                      command=next_m).pack(side='right')
+
+            # Day-of-week header
+            hdr = tk.Frame(body, bg='#EBEBEB')
+            hdr.pack()
+            for h in ('Mo','Tu','We','Th','Fr','Sa','Su'):
+                tk.Label(hdr, text=h, font=FS, width=3, anchor='center',
+                         bg=HDR_BG, fg='white').pack(side='left', padx=1, pady=1)
+
+            # Day grid
+            for week in _cal.monthcalendar(vy[0], vm[0]):
+                row = tk.Frame(body, bg='#EBEBEB')
+                row.pack()
+                for day in week:
+                    if day == 0:
+                        tk.Label(row, text='', width=3, font=FS,
+                                 bg='#EBEBEB').pack(side='left', padx=1, pady=1)
+                    else:
+                        selected = (day == self._date.day and
+                                    vm[0] == self._date.month and
+                                    vy[0] == self._date.year)
+                        bg = HDR_BG if selected else '#F8F8F8'
+                        fg = '#FFF'  if selected else '#000'
+                        tk.Button(row, text=str(day), width=3, font=FS,
+                                  bg=bg, fg=fg, relief='flat', activebackground='#6A90BB',
+                                  command=lambda d=day: pick(d)).pack(side='left',
+                                                                       padx=1, pady=1)
+
+        def prev_m():
+            m, y = vm[0]-1, vy[0]
+            if m < 1: m, y = 12, y-1
+            vm[0], vy[0] = m, y
+            draw()
+
+        def next_m():
+            m, y = vm[0]+1, vy[0]
+            if m > 12: m, y = 1, y+1
+            vm[0], vy[0] = m, y
+            draw()
+
+        def pick(day):
+            from datetime import date
+            self._date = date(vy[0], vm[0], day)
+            self._btn.config(text=str(self._date))
+            popup.destroy()
+            self._popup = None
+            if self._on_change:
+                self._on_change()
+
+        draw()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 6 — REPORTS
+# ─────────────────────────────────────────────────────────────────────────────
+class ReportsTab(ttk.Frame):
+    """Attendance-hours report with one column per net type, plus a total column.
+    Date range chosen via popup calendar pickers."""
+
+    # Fixed columns; net-type columns are inserted dynamically at run time
+    _FIXED = ('Callsign', 'Operator')
+    _TOTAL = 'Total Hrs'
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self._rows      = []
+        self._col_names = list(self._FIXED) + [self._TOTAL]  # updated at run time
+        self._sort_col  = None
+        self._sort_rev  = False
+        self._build()
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    def _build(self):
+        tk.Label(self, text='STATION ATTENDANCE REPORT', font=FT,
+                 fg=HDR_BG).pack(pady=(14, 4))
+
+        # ── Date-range controls ───────────────────────────────────────────────
+        ctrl = tk.Frame(self)
+        ctrl.pack(fill='x', padx=20, pady=(0, 8))
+
+        from datetime import date, timedelta
+        today = date.today()
+
+        tk.Label(ctrl, text='From:', font=FA).pack(side='left')
+        self._from_picker = _DatePickerButton(ctrl, today - timedelta(days=90))
+        self._from_picker.pack(side='left', padx=(4, 14))
+
+        tk.Label(ctrl, text='To:', font=FA).pack(side='left')
+        self._to_picker = _DatePickerButton(ctrl, today)
+        self._to_picker.pack(side='left', padx=(4, 14))
+
+        tk.Button(ctrl, text='  Run Report  ', font=FB,
+                  bg=HDR_BG, fg='#FFF', padx=8, pady=3,
+                  command=self._run).pack(side='left', padx=4)
+
+        tk.Button(ctrl, text='Export CSV', font=FA, padx=6,
+                  command=self._export_csv).pack(side='left', padx=4)
+
+        self.v_status_lbl = tk.StringVar(value='')
+        tk.Label(ctrl, textvariable=self.v_status_lbl,
+                 font=FS, fg='#555').pack(side='left', padx=12)
+
+        # ── Treeview container (columns built dynamically) ────────────────────
+        tf = tk.Frame(self)
+        tf.pack(fill='both', expand=True, padx=20, pady=(0, 8))
+        tf.rowconfigure(0, weight=1)
+        tf.columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(tf, columns=self._col_names, show='headings',
+                                 selectmode='browse', height=20)
+        self._apply_col_config()
+
+        self._vsb = ttk.Scrollbar(tf, orient='vertical',   command=self.tree.yview)
+        self._hsb = ttk.Scrollbar(tf, orient='horizontal', command=self.tree.xview)
+        self.tree.configure(yscrollcommand=self._vsb.set, xscrollcommand=self._hsb.set)
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        self._vsb.grid(row=0, column=1, sticky='ns')
+        self._hsb.grid(row=1, column=0, sticky='ew')
+
+        self.tree.tag_configure('odd',   background=ROW_ODD)
+        self.tree.tag_configure('evn',   background=ROW_EVN)
+        self.tree.tag_configure('total', background='#CCD9EF',
+                                font=(_FF, 10, 'bold'))
+
+    def _apply_col_config(self):
+        """Set heading/column properties for the current self._col_names list."""
+        self.tree['columns'] = self._col_names
+        for col in self._col_names:
+            fixed = col in self._FIXED
+            w   = 200 if col == 'Operator' else (110 if fixed else 90)
+            anc = 'w' if fixed else 'e'
+            self.tree.heading(col, text=col,
+                              command=lambda c=col: self._sort(c))
+            self.tree.column(col, width=w, minwidth=40, anchor=anc, stretch=False)
+
+    # ── Report engine ─────────────────────────────────────────────────────────
+    def _run(self):
+        from_date = self._from_picker.date
+        to_date   = self._to_picker.date
+        if from_date > to_date:
+            messagebox.showwarning('Invalid Range',
+                '"From" date must be on or before "To" date.', parent=self)
+            return
+        from_str, to_str = str(from_date), str(to_date)
+
+        conn = get_archive_db()
+
+        sessions = conn.execute("""
+            SELECT session_id, net_date, net_name, ncs_callsign, secured_time
+            FROM   sessions
+            WHERE  net_date BETWEEN ? AND ?
+              AND  secured_time != ''
+            ORDER  BY net_date, session_id
+        """, (from_str, to_str)).fetchall()
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        if not sessions:
+            self.v_status_lbl.set('No archived sessions with a secured time in that range.')
+            self._rows = []
+            return
+
+        # ── Collect all distinct net types (preserving insertion order → sorted) ─
+        net_types_seen = {}
+        for sess in sessions:
+            nt = (sess['net_name'] or 'UNKNOWN').strip() or 'UNKNOWN'
+            net_types_seen[nt] = True
+        net_types = sorted(net_types_seen.keys())
+
+        # station_data[cs] = {operator, net_hours: {net_type: float}, total: float}
+        station_data = {}
+
+        for sess in sessions:
+            sid    = sess['session_id']
+            ncs_cs = (sess['ncs_callsign'] or '').strip().upper()
+            nt     = (sess['net_name'] or 'UNKNOWN').strip() or 'UNKNOWN'
+            sec_str = (sess['secured_time'] or '').strip()
+
+            if len(sec_str) == 4 and sec_str.isdigit():
+                sec_h, sec_m = int(sec_str[:2]), int(sec_str[2:])
+            else:
+                continue
+
+            if not ncs_cs:
+                continue
+            ncs_row = conn.execute("""
+                SELECT MIN(checkin_time) AS ncs_start
+                FROM   checkins
+                WHERE  session_id = ? AND from_callsign = ?
+                  AND  checkin_time != ''
+            """, (sid, ncs_cs)).fetchone()
+
+            ncs_start_str = ncs_row['ncs_start'] if ncs_row else None
+            if not ncs_start_str:
+                continue
+
+            try:
+                parts = ncs_start_str.split(':')
+                ncs_h, ncs_m = int(parts[0]), int(parts[1])
+            except (ValueError, IndexError):
+                continue
+
+            duration_h = (sec_h * 60 + sec_m - ncs_h * 60 - ncs_m) / 60.0
+            if duration_h <= 0:
+                continue
+
+            checkin_rows = conn.execute("""
+                SELECT DISTINCT from_callsign, from_operator
+                FROM   checkins
+                WHERE  session_id = ?
+                  AND  checkin_time != ''
+                  AND  from_callsign != ''
+            """, (sid,)).fetchall()
+
+            for row in checkin_rows:
+                cs = (row['from_callsign'] or '').strip().upper()
+                op = (row['from_operator'] or '').strip()
+                if not cs:
+                    continue
+                if cs not in station_data:
+                    station_data[cs] = {'operator': op,
+                                        'net_hours': {nt: 0.0 for nt in net_types},
+                                        'total': 0.0}
+                elif op and not station_data[cs]['operator']:
+                    station_data[cs]['operator'] = op
+                station_data[cs]['net_hours'][nt] = (
+                    station_data[cs]['net_hours'].get(nt, 0.0) + duration_h)
+                station_data[cs]['total'] += duration_h
+
+        if not station_data:
+            self.v_status_lbl.set('No check-ins found in that date range.')
+            self._rows = []
+            return
+
+        # ── Rebuild treeview columns: Callsign | Operator | <net types> | Total ─
+        self._col_names = list(self._FIXED) + net_types + [self._TOTAL]
+        self._apply_col_config()
+
+        # Sort by total hours descending
+        sorted_rows = sorted(station_data.items(), key=lambda x: -x[1]['total'])
+
+        self._rows      = []
+        grand_by_type   = {nt: 0.0 for nt in net_types}
+        grand_total     = 0.0
+
+        for i, (cs, d) in enumerate(sorted_rows):
+            tag  = 'evn' if i % 2 else 'odd'
+            vals = [cs, d['operator']]
+            for nt in net_types:
+                h = d['net_hours'].get(nt, 0.0)
+                vals.append(f'{h:.1f}' if h else '')
+                grand_by_type[nt] += h
+            vals.append(f'{d["total"]:.1f}')
+            grand_total += d['total']
+            t = tuple(vals)
+            self.tree.insert('', 'end', tag=tag, values=t)
+            self._rows.append(t)
+
+        # Totals row
+        tot_vals = ['TOTAL', f'{len(station_data)} stations']
+        for nt in net_types:
+            tot_vals.append(f'{grand_by_type[nt]:.1f}')
+        tot_vals.append(f'{grand_total:.1f}')
+        t = tuple(tot_vals)
+        self.tree.insert('', 'end', tag='total', values=t)
+        self._rows.append(t)
+
+        n_sess = len(sessions)
+        self.v_status_lbl.set(
+            f'{len(station_data)} stations  ·  {n_sess} session{"s" if n_sess != 1 else ""}  '
+            f'·  {len(net_types)} net type{"s" if len(net_types) != 1 else ""}  '
+            f'·  {grand_total:.1f} total hrs')
+        self._sort_col = None
+
+    # ── Column sort ───────────────────────────────────────────────────────────
+    def _sort(self, col):
+        items = [(self.tree.set(k, col), k)
+                 for k in self.tree.get_children()
+                 if 'total' not in (self.tree.item(k, 'tags') or ())]
+        rev = (self._sort_col == col and not self._sort_rev)
+        try:
+            items.sort(key=lambda x: float(x[0]) if x[0] else -1e9, reverse=rev)
+        except ValueError:
+            items.sort(key=lambda x: x[0].lower(), reverse=rev)
+        for idx, (_, k) in enumerate(items):
+            self.tree.move(k, '', idx)
+            self.tree.item(k, tags=('evn' if idx % 2 else 'odd',))
+        for k in self.tree.get_children():
+            if 'total' in (self.tree.item(k, 'tags') or ()):
+                self.tree.move(k, '', 'end')
+        self._sort_col = col
+        self._sort_rev = rev
+
+    # ── CSV export ────────────────────────────────────────────────────────────
+    def _export_csv(self):
+        if not self._rows:
+            messagebox.showinfo('No Data', 'Run the report first.', parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            title='Export Attendance Report',
+            defaultextension='.csv',
+            filetypes=[('CSV', '*.csv'), ('All', '*.*')],
+            initialfile='attendance_report.csv',
+            initialdir=BASE)
+        if not path:
+            return
+        import csv
+        with open(path, 'w', newline='', encoding='utf-8') as f:
+            w = csv.writer(f)
+            w.writerow(self._col_names)
+            w.writerows(self._rows)
+        self.app.set_status(f'Report exported → {os.path.basename(path)}')
+
+    def refresh(self):
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN APPLICATION WINDOW
 # ─────────────────────────────────────────────────────────────────────────────
 class NetLogApp(tk.Tk):
@@ -2530,12 +2949,14 @@ class NetLogApp(tk.Tk):
         self.archives_tab = ArchivesTab(self.notebook, self)
 
         self.maintenance_tab = MaintenanceTab(self.notebook, self)
+        self.reports_tab     = ReportsTab(self.notebook, self)
 
         self.notebook.add(self.log_tab,          text='   Net Log   ')
         self.notebook.add(self.session_tab,      text='   Session Setup   ')
         self.notebook.add(self.members_tab,      text='   Members   ')
         self.notebook.add(self.archives_tab,     text='   Archives   ')
         self.notebook.add(self.maintenance_tab,  text='   Maintenance   ')
+        self.notebook.add(self.reports_tab,      text='   Reports   ')
 
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab)
 
@@ -2556,6 +2977,8 @@ class NetLogApp(tk.Tk):
             self.archives_tab.refresh()
         elif idx == 4:
             self.maintenance_tab.refresh()
+        elif idx == 5:
+            self.reports_tab.refresh()
 
     # ── App-level actions ─────────────────────────────────────────────────────
     def set_status(self, msg: str):

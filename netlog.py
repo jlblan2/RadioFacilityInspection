@@ -681,10 +681,13 @@ class CheckIn:
         # Prefer great-circle calculation from DB coordinates; fall back to the
         # Excel-loaded matrices when either station has no coordinates on file.
         gc_done = False
+        # When "Show My D&B" is on, use Station Callsign as the reference point
+        # (fall back to NCS Callsign if Station Callsign is not set)
+        my_cs = (session.station_callsign or session.ncs_callsign or '').strip().upper()
+
         if self.from_callsign:
-            # show_my_db swaps the pair so NCS→station distance is shown
-            if session.show_my_db and session.ncs_callsign:
-                cs_a, cs_b = session.ncs_callsign, self.from_callsign
+            if session.show_my_db and my_cs:
+                cs_a, cs_b = my_cs, self.from_callsign
             else:
                 cs_a, cs_b = self.from_callsign, self.to_callsign
 
@@ -699,11 +702,11 @@ class CheckIn:
         if not gc_done:
             self.distance_miles  = lookup_distance(
                 self.from_callsign, self.to_callsign, dist_matrix,
-                ncs_cs=session.ncs_callsign, show_my_db=session.show_my_db
+                ncs_cs=my_cs, show_my_db=session.show_my_db
             )
             self.bearing_degrees = lookup_bearing(
                 self.from_callsign, self.to_callsign, bear_matrix,
-                ncs_cs=session.ncs_callsign, show_my_db=session.show_my_db
+                ncs_cs=my_cs, show_my_db=session.show_my_db
             )
 
     def signal_summary(self) -> str:
