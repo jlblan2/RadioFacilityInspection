@@ -2605,9 +2605,11 @@ class ReportsTab(ttk.Frame):
         conn = get_archive_db()
 
         sessions = conn.execute("""
-            SELECT session_id, net_date, net_name, ncs_callsign, secured_time
+            SELECT session_id, net_date, net_name, ncs_callsign,
+                   start_time, secured_time
             FROM   sessions
             WHERE  net_date BETWEEN ? AND ?
+              AND  start_time   != ''
               AND  secured_time != ''
             ORDER  BY net_date, session_id
         """, (from_str, to_str)).fetchall()
@@ -2631,36 +2633,21 @@ class ReportsTab(ttk.Frame):
         station_data = {}
 
         for sess in sessions:
-            sid    = sess['session_id']
-            ncs_cs = (sess['ncs_callsign'] or '').strip().upper()
-            nt     = (sess['net_name'] or 'UNKNOWN').strip() or 'UNKNOWN'
+            sid     = sess['session_id']
+            nt      = (sess['net_name'] or 'UNKNOWN').strip() or 'UNKNOWN'
+            sta_str = (sess['start_time']   or '').strip()
             sec_str = (sess['secured_time'] or '').strip()
 
-            if len(sec_str) == 4 and sec_str.isdigit():
-                sec_h, sec_m = int(sec_str[:2]), int(sec_str[2:])
-            else:
+            # Both times stored as HHMM (4 digits, no colon)
+            if not (len(sta_str) == 4 and sta_str.isdigit()):
+                continue
+            if not (len(sec_str) == 4 and sec_str.isdigit()):
                 continue
 
-            if not ncs_cs:
-                continue
-            ncs_row = conn.execute("""
-                SELECT MIN(checkin_time) AS ncs_start
-                FROM   checkins
-                WHERE  session_id = ? AND from_callsign = ?
-                  AND  checkin_time != ''
-            """, (sid, ncs_cs)).fetchone()
+            sta_h, sta_m = int(sta_str[:2]), int(sta_str[2:])
+            sec_h, sec_m = int(sec_str[:2]), int(sec_str[2:])
 
-            ncs_start_str = ncs_row['ncs_start'] if ncs_row else None
-            if not ncs_start_str:
-                continue
-
-            try:
-                parts = ncs_start_str.split(':')
-                ncs_h, ncs_m = int(parts[0]), int(parts[1])
-            except (ValueError, IndexError):
-                continue
-
-            duration_h = (sec_h * 60 + sec_m - ncs_h * 60 - ncs_m) / 60.0
+            duration_h = (sec_h * 60 + sec_m - sta_h * 60 - sta_m) / 60.0
             if duration_h <= 0:
                 continue
 
