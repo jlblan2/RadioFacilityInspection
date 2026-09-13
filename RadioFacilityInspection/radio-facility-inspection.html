@@ -1,0 +1,545 @@
+<title>Radio Facility Inspection</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#10233a;
+  --ink-soft:#4b5f6f;
+  --paper:#eef2ef;
+  --surface:#ffffff;
+  --line:#ccd6d3;
+  --accent:#c8102e;
+  --teal:#1b6f79;
+  --ok:#2f7d4f;
+  --warn:#a8760a;
+  --shadow: 0 1px 2px rgba(16,35,58,.06), 0 4px 14px rgba(16,35,58,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ink:#e7edf0;
+    --ink-soft:#9db0bb;
+    --paper:#0c161d;
+    --surface:#12212b;
+    --line:#294049;
+    --accent:#ff8388;
+    --teal:#5cc3cd;
+    --ok:#6bcf8e;
+    --warn:#e3b955;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"]{
+  --ink:#e7edf0;
+  --ink-soft:#9db0bb;
+  --paper:#0c161d;
+  --surface:#12212b;
+  --line:#294049;
+  --accent:#ff8388;
+  --teal:#5cc3cd;
+  --ok:#6bcf8e;
+  --warn:#e3b955;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box;}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:"IBM Plex Sans", system-ui, sans-serif;
+  line-height:1.5;
+}
+.wrap{max-width:820px;margin:0 auto;padding:2.5rem 1.25rem 4rem;}
+
+.toolbar{
+  position:sticky; top:0; z-index:5;
+  display:flex; justify-content:flex-end; gap:.5rem;
+  padding:.6rem 1.25rem; margin-bottom:0;
+  background:color-mix(in srgb, var(--paper) 88%, transparent);
+  backdrop-filter:blur(6px);
+}
+.btn{
+  font-family:"IBM Plex Mono", monospace;
+  font-size:.72rem; letter-spacing:.04em; text-transform:uppercase;
+  border:1px solid var(--line); background:var(--surface); color:var(--ink-soft);
+  padding:.45rem .8rem; border-radius:3px; cursor:pointer;
+}
+.btn:hover{border-color:var(--teal); color:var(--teal);}
+.btn:focus-visible{outline:2px solid var(--teal); outline-offset:2px;}
+
+header.title-block{
+  border-bottom:3px solid var(--ink);
+  padding-bottom:1.1rem; margin-bottom:1.5rem;
+}
+.eyebrow{
+  font-family:"IBM Plex Mono", monospace; font-size:.72rem;
+  letter-spacing:.12em; text-transform:uppercase; color:var(--teal);
+  margin:0 0 .35rem;
+}
+h1{
+  font-family:"Oswald", sans-serif; font-weight:600;
+  font-size:clamp(1.7rem, 4vw, 2.35rem); letter-spacing:.01em;
+  margin:0 0 .3rem; text-wrap:balance; color:var(--ink);
+}
+.subtitle{color:var(--ink-soft); font-size:.98rem; max-width:56ch;}
+
+.notice{
+  border-left:3px solid var(--warn);
+  background:var(--surface);
+  padding:.75rem 1rem; border-radius:0 4px 4px 0;
+  font-size:.86rem; color:var(--ink-soft);
+  margin-bottom:1.75rem; box-shadow:var(--shadow);
+}
+.notice strong{color:var(--ink);}
+
+.field-grid{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:.9rem 1.1rem;
+  background:var(--surface); border:1px solid var(--line); border-radius:6px;
+  padding:1.1rem; margin-bottom:2rem; box-shadow:var(--shadow);
+}
+.field label{
+  display:block; font-family:"IBM Plex Mono", monospace;
+  font-size:.68rem; letter-spacing:.07em; text-transform:uppercase;
+  color:var(--teal); margin-bottom:.3rem;
+}
+.field input, .field select{
+  width:100%; font-family:"IBM Plex Sans", sans-serif; font-size:.92rem;
+  color:var(--ink); background:transparent; border:none;
+  border-bottom:1px solid var(--line); padding:.25rem 0;
+}
+.field input:focus, .field select:focus{outline:none; border-bottom-color:var(--teal);}
+
+section.section{
+  background:var(--surface); border:1px solid var(--line); border-radius:6px;
+  margin-bottom:1.4rem; box-shadow:var(--shadow); overflow:hidden;
+}
+.section-head{
+  display:flex; align-items:baseline; gap:.7rem;
+  padding:.9rem 1.1rem; border-bottom:1px solid var(--line);
+  background:color-mix(in srgb, var(--teal) 7%, var(--surface));
+}
+.section-letter{
+  font-family:"Oswald", sans-serif; font-weight:600; font-size:1.1rem;
+  color:var(--teal); min-width:1.4rem;
+}
+.section-head h2{
+  font-family:"Oswald", sans-serif; font-weight:500; font-size:1.05rem;
+  margin:0; letter-spacing:.01em; color:var(--ink);
+}
+.section-body{padding:.2rem 1.1rem .6rem;}
+
+.row{
+  display:flex; gap:.75rem; align-items:flex-start;
+  padding:.6rem 0; border-bottom:1px solid var(--line);
+}
+.row:last-child{border-bottom:none;}
+.row input[type="checkbox"]{
+  margin-top:.2rem; width:16px; height:16px; accent-color:var(--teal); flex:none;
+}
+.row .txt{flex:1;}
+.row .item{font-size:.93rem;}
+.row .spec{
+  display:block; font-family:"IBM Plex Mono", monospace; font-size:.72rem;
+  color:var(--ink-soft); margin-top:.15rem;
+}
+.row textarea{
+  width:100%; margin-top:.4rem; font-family:"IBM Plex Sans", sans-serif;
+  font-size:.85rem; color:var(--ink); background:var(--paper);
+  border:1px solid var(--line); border-radius:4px; padding:.5rem; resize:vertical;
+}
+
+.stamp-row{display:flex; gap:.6rem; flex-wrap:wrap; padding:.9rem 1.1rem 0;}
+.stamp{
+  font-family:"Oswald", sans-serif; font-weight:600; letter-spacing:.05em;
+  text-transform:uppercase; font-size:.82rem;
+  border:2px solid var(--line); border-radius:4px; padding:.5rem 1rem;
+  background:transparent; color:var(--ink-soft); cursor:pointer;
+}
+.stamp[data-state="pass"][aria-pressed="true"]{border-color:var(--ok); color:var(--ok);}
+.stamp[data-state="conditional"][aria-pressed="true"]{border-color:var(--warn); color:var(--warn);}
+.stamp[data-state="fail"][aria-pressed="true"]{border-color:var(--accent); color:var(--accent);}
+
+.sign-grid{
+  display:grid; grid-template-columns:1fr 1fr; gap:1.2rem 1.5rem;
+  padding:1rem 1.1rem 1.2rem;
+}
+.sign-field{border-bottom:1px solid var(--line); padding-bottom:.3rem;}
+.sign-field label{
+  display:block; font-family:"IBM Plex Mono", monospace; font-size:.68rem;
+  letter-spacing:.06em; text-transform:uppercase; color:var(--teal); margin-bottom:.3rem;
+}
+.sign-field input{
+  width:100%; border:none; background:transparent; font-size:.9rem; color:var(--ink);
+}
+.sign-field input:focus{outline:none;}
+
+/* Appendix */
+.appendix{
+  background:var(--surface); border:1px solid var(--line); border-radius:6px;
+  margin-bottom:1.4rem; box-shadow:var(--shadow); overflow:hidden;
+}
+.appendix-head{
+  padding:1rem 1.1rem; border-bottom:1px solid var(--line);
+  background:color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+.appendix-head p.eyebrow{margin-bottom:.2rem;}
+.appendix-head h2{
+  font-family:"Oswald", sans-serif; font-weight:500; font-size:1.2rem; margin:0; color:var(--ink);
+}
+.appendix-intro{padding:.9rem 1.1rem 0; font-size:.88rem; color:var(--ink-soft); max-width:64ch;}
+.appendix-intro strong{color:var(--ink);}
+.tools-list{
+  display:flex; flex-wrap:wrap; gap:.4rem .5rem; padding:.7rem 1.1rem 0; list-style:none; margin:0;
+}
+.tools-list li{
+  font-family:"IBM Plex Mono", monospace; font-size:.7rem; letter-spacing:.02em;
+  border:1px solid var(--line); border-radius:3px; padding:.2rem .5rem; color:var(--ink-soft);
+}
+.subsec{padding:1rem 1.1rem;}
+.subsec + .subsec{border-top:1px solid var(--line);}
+.subsec h3{
+  font-family:"Oswald", sans-serif; font-weight:500; font-size:.95rem;
+  margin:0 0 .5rem; color:var(--teal); display:flex; align-items:baseline; gap:.5rem;
+}
+.subsec h3 .tag{
+  font-family:"IBM Plex Mono", monospace; font-size:.68rem; color:var(--ink-soft); font-weight:400;
+}
+.subsec ol{margin:0; padding-left:1.2rem;}
+.subsec ol li{font-size:.89rem; margin-bottom:.5rem; padding-left:.2rem;}
+.subsec ol li:last-child{margin-bottom:0;}
+.subsec .callout{
+  font-family:"IBM Plex Mono", monospace; font-size:.74rem; color:var(--ink-soft);
+  background:var(--paper); border:1px solid var(--line); border-radius:4px;
+  padding:.5rem .65rem; margin-top:.5rem;
+}
+.subsec .callout.warn{border-color:var(--warn); color:var(--warn);}
+
+.log-table{width:100%; border-collapse:collapse; margin-top:.3rem;}
+.log-table th{
+  font-family:"IBM Plex Mono", monospace; font-size:.65rem; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--teal); text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--line);
+}
+.log-table td{border-bottom:1px solid var(--line); padding:.3rem .5rem; vertical-align:top;}
+.log-table input, .log-table select{
+  width:100%; border:none; background:transparent; font-family:"IBM Plex Sans", sans-serif;
+  font-size:.83rem; color:var(--ink); padding:.2rem 0;
+}
+.log-table input:focus, .log-table select:focus{outline:none;}
+.log-table-wrap{overflow-x:auto; padding:0 1.1rem 1.1rem;}
+
+footer.note{
+  margin-top:2rem; font-size:.78rem; color:var(--ink-soft);
+  border-top:1px solid var(--line); padding-top:1rem;
+}
+
+@media print{
+  :root{ --ink:#10233a; --paper:#ffffff; --surface:#ffffff; --line:#c9c9c9; --teal:#1b6f79; --accent:#c8102e; --ok:#2f7d4f; --warn:#a8760a; --shadow:none;}
+  body{background:#fff;}
+  .no-print{display:none!important;}
+  section.section, .appendix{box-shadow:none; break-inside:avoid;}
+}
+</style>
+
+<div class="toolbar no-print">
+  <button class="btn" id="printBtn">Print / Save PDF</button>
+  <button class="btn" id="resetBtn">Reset form</button>
+</div>
+
+<div class="wrap">
+
+  <header class="title-block">
+    <p class="eyebrow">Flotilla-Level Field SOP · Communications</p>
+    <h1>VHF/HF Radio Facility Inspection</h1>
+    <p class="subtitle">A combined documentation, technical, and net-readiness checklist for examining a member's VHF and/or HF radio station offered as a U.S. Coast Guard Auxiliary operational facility.</p>
+  </header>
+
+  <div class="notice">
+    <strong>Field aid, not the official record.</strong> This checklist is a working tool for flotilla examiners. It does not replace the current Auxiliary Manual (COMDTINST M16790.1), your District's Facility program SOPs, or the official Facility Examination form — confirm current form numbers, required signatures, and standards with your FSO-MS / SO-MS or DIRAUX before filing results.
+  </div>
+
+  <div class="field-grid">
+    <div class="field"><label>Owner / Operator</label><input type="text" data-key="owner"></div>
+    <div class="field"><label>Callsign</label><input type="text" data-key="callsign"></div>
+    <div class="field"><label>Flotilla / Division</label><input type="text" data-key="flotilla"></div>
+    <div class="field"><label>Facility Type</label>
+      <select data-key="factype">
+        <option value="">Select…</option>
+        <option>Fixed station</option>
+        <option>Mobile (vehicle)</option>
+        <option>Portable</option>
+      </select>
+    </div>
+    <div class="field"><label>Bands Offered</label>
+      <select data-key="bands">
+        <option value="">Select…</option>
+        <option>VHF only</option>
+        <option>HF only</option>
+        <option>VHF and HF</option>
+      </select>
+    </div>
+    <div class="field"><label>Inspection Date</label><input type="date" data-key="date"></div>
+    <div class="field"><label>Examiner Name / Member #</label><input type="text" data-key="examiner"></div>
+    <div class="field"><label>Prior Inspection / Result</label><input type="text" data-key="prior"></div>
+  </div>
+
+  <!-- A -->
+  <section class="section">
+    <div class="section-head"><span class="section-letter">A</span><h2>Documentation &amp; Administrative Review</h2></div>
+    <div class="section-body">
+      <label class="row"><input type="checkbox" data-key="a1"><span class="txt"><span class="item">Operator's Auxiliary membership and required Communications specialty training are current</span></span></label>
+      <label class="row"><input type="checkbox" data-key="a2"><span class="txt"><span class="item">Facility offer / agreement for use is on file and matches equipment being inspected</span></span></label>
+      <label class="row"><input type="checkbox" data-key="a3"><span class="txt"><span class="item">Equipment list (make, model, serial) matches what is physically installed</span></span></label>
+      <label class="row"><input type="checkbox" data-key="a4"><span class="txt"><span class="item">Operator holds the license/authorization required for frequencies used</span><span class="spec">FCC restricted radiotelephone / amateur license (General+ for HF) / CG-issued authorization, as applicable</span></span></label>
+      <label class="row"><input type="checkbox" data-key="a5"><span class="txt"><span class="item">Prior year's inspection report on file, deficiencies (if any) corrected</span></span></label>
+    </div>
+  </section>
+
+  <!-- B -->
+  <section class="section">
+    <div class="section-head"><span class="section-letter">B</span><h2>VHF Equipment &amp; Installation</h2></div>
+    <div class="section-body">
+      <label class="row"><input type="checkbox" data-key="b1"><span class="txt"><span class="item">Transceiver powers up cleanly; make/model/serial recorded</span></span></label>
+      <label class="row"><input type="checkbox" data-key="b2"><span class="txt"><span class="item">Transmit power within spec on high and low settings</span><span class="spec">Typ. ~25 W high / 1 W low, fixed or mobile marine VHF</span></span></label>
+      <label class="row"><input type="checkbox" data-key="b3"><span class="txt"><span class="item">Ch. 16 and required working/weather channels programmed and receive clearly</span></span></label>
+      <label class="row"><input type="checkbox" data-key="b4"><span class="txt"><span class="item">DSC function operational with correct MMSI; GPS input connected if equipped</span></span></label>
+      <label class="row"><input type="checkbox" data-key="b5"><span class="txt"><span class="item">Antenna, coax, and connectors in good condition; connections weatherproofed</span></span></label>
+      <label class="row"><input type="checkbox" data-key="b6"><span class="txt"><span class="item">SWR measured at feedpoint and within spec</span><span class="spec">≤ 2:1 acceptable, ≤ 1.5:1 preferred</span></span></label>
+      <label class="row"><input type="checkbox" data-key="b7"><span class="txt"><span class="item">Antenna mount secure; coax routed with drip loop, no chafe points</span></span></label>
+    </div>
+  </section>
+
+  <!-- C -->
+  <section class="section">
+    <div class="section-head"><span class="section-letter">C</span><h2>HF Equipment &amp; Installation</h2></div>
+    <div class="section-body">
+      <label class="row"><input type="checkbox" data-key="c1"><span class="txt"><span class="item">Transceiver powers up cleanly; make/model/serial recorded</span></span></label>
+      <label class="row"><input type="checkbox" data-key="c2"><span class="txt"><span class="item">Frequency coverage includes assigned Auxiliary/CG and/or net working frequencies</span></span></label>
+      <label class="row"><input type="checkbox" data-key="c3"><span class="txt"><span class="item">Transmit power matches operator's license class and equipment rating</span></span></label>
+      <label class="row"><input type="checkbox" data-key="c4"><span class="txt"><span class="item">Antenna tuner present and achieves match across bands in use</span></span></label>
+      <label class="row"><input type="checkbox" data-key="c5"><span class="txt"><span class="item">SWR acceptable on each band used for net operations</span></span></label>
+      <label class="row"><input type="checkbox" data-key="c6"><span class="txt"><span class="item">Antenna type/height suits mission — NVIS for regional net coverage vs. higher/directional for long-haul</span></span></label>
+      <label class="row"><input type="checkbox" data-key="c7"><span class="txt"><span class="item">Ground / counterpoise system adequate for antenna type</span></span></label>
+    </div>
+  </section>
+
+  <!-- D -->
+  <section class="section">
+    <div class="section-head"><span class="section-letter">D</span><h2>Power Systems</h2></div>
+    <div class="section-body">
+      <label class="row"><input type="checkbox" data-key="d1"><span class="txt"><span class="item">Primary power connection secure and properly fused</span></span></label>
+      <label class="row"><input type="checkbox" data-key="d2"><span class="txt"><span class="item">Backup power source present and sized to run the station through an outage</span><span class="spec">Battery / generator / solar — confirm runtime against unit's expected net duration</span></span></label>
+      <label class="row"><input type="checkbox" data-key="d3"><span class="txt"><span class="item">Battery voltage checked under transmit load</span></span></label>
+      <label class="row"><input type="checkbox" data-key="d4"><span class="txt"><span class="item">Operator can demonstrate switch-over to backup power without assistance</span></span></label>
+    </div>
+  </section>
+
+  <!-- E -->
+  <section class="section">
+    <div class="section-head"><span class="section-letter">E</span><h2>Grounding, Lightning &amp; Safety</h2></div>
+    <div class="section-body">
+      <label class="row"><input type="checkbox" data-key="e1"><span class="txt"><span class="item">Station ground rod / bond to structural ground present and intact</span><span class="spec">Verify per Appendix A procedure</span></span></label>
+      <label class="row"><input type="checkbox" data-key="e2"><span class="txt"><span class="item">Coax surge suppressor and a means to disconnect/ground antenna feedlines when not in use</span></span></label>
+      <label class="row"><input type="checkbox" data-key="e3"><span class="txt"><span class="item">Antenna placement keeps personnel clear of the RF exposure zone at rated power</span></span></label>
+      <label class="row"><input type="checkbox" data-key="e4"><span class="txt"><span class="item">Cabling secured, no trip hazards; outdoor connections weatherproofed</span></span></label>
+    </div>
+  </section>
+
+  <!-- F -->
+  <section class="section">
+    <div class="section-head"><span class="section-letter">F</span><h2>Operational &amp; Net Readiness</h2></div>
+    <div class="section-body">
+      <label class="row"><input type="checkbox" data-key="f1"><span class="txt"><span class="item">Voice check completed with NCS or another qualified station on the VHF working channel</span></span></label>
+      <label class="row"><input type="checkbox" data-key="f2"><span class="txt"><span class="item">Voice check completed with NCS on the HF working frequency</span><span class="spec">Note propagation/time-of-day if signal was marginal</span></span></label>
+      <label class="row"><input type="checkbox" data-key="f3"><span class="txt"><span class="item">Signal report obtained and logged</span><span class="spec">e.g. readability/strength "5x5" or RST</span></span></label>
+      <label class="row"><input type="checkbox" data-key="f4"><span class="txt"><span class="item">Alternate/backup frequency known and tested</span></span></label>
+      <label class="row"><input type="checkbox" data-key="f5"><span class="txt"><span class="item">Operator demonstrates net log procedure (paper or digital) and can record a check-in correctly</span></span></label>
+      <label class="row"><input type="checkbox" data-key="f6"><span class="txt"><span class="item">Operator can describe emergency/priority traffic handling procedure</span></span></label>
+    </div>
+  </section>
+
+  <!-- G -->
+  <section class="section">
+    <div class="section-head"><span class="section-letter">G</span><h2>Examiner Findings &amp; Certification</h2></div>
+    <div class="stamp-row">
+      <button class="stamp" data-state="pass" aria-pressed="false">Pass</button>
+      <button class="stamp" data-state="conditional" aria-pressed="false">Conditional</button>
+      <button class="stamp" data-state="fail" aria-pressed="false">Fail</button>
+    </div>
+    <div class="section-body">
+      <label class="row"><span class="txt"><span class="item">Deficiencies noted / corrective action required</span>
+        <textarea rows="3" data-key="deficiencies" placeholder="Describe any items marked unsatisfactory and the date by which they must be corrected."></textarea>
+      </span></label>
+    </div>
+    <div class="sign-grid">
+      <div class="sign-field"><label>Examiner Signature</label><input type="text" data-key="sig-examiner"></div>
+      <div class="sign-field"><label>Date</label><input type="date" data-key="sig-date"></div>
+      <div class="sign-field"><label>Owner/Operator Signature</label><input type="text" data-key="sig-owner"></div>
+      <div class="sign-field"><label>Next Inspection Due</label><input type="date" data-key="sig-next"></div>
+    </div>
+  </section>
+
+  <!-- Appendix A -->
+  <section class="appendix">
+    <div class="appendix-head">
+      <p class="eyebrow">Appendix A</p>
+      <h2>Grounding &amp; Bonding Verification Procedure</h2>
+    </div>
+    <p class="appendix-intro">Supports Section E. Use this procedure to actually verify each grounding item rather than eyeballing it — a station can look grounded and still have a broken bond, a corroded lug, or a lost RF ground that only shows up as a ruined SWR match or a shock hazard. Work through 1–5 in order; each depends on the one before it.</p>
+    <ul class="tools-list no-print">
+      <li>Digital multimeter (ohms/continuity)</li>
+      <li>Ground resistance tester (clamp-on or fall-of-potential), if available</li>
+      <li>Wire brush / fine sandpaper</li>
+      <li>Nut driver / wrench set</li>
+      <li>Insulated gloves</li>
+    </ul>
+
+    <div class="subsec">
+      <h3>A.1 <span class="tag">— concept</span> Single-Point Ground System</h3>
+      <ol>
+        <li>Confirm the station has one common ground reference — a bus bar or heavy copper strap that every piece of equipment bonds to — rather than each item running to its own separate rod or cold-water pipe. Separate grounds at different earth potentials is what turns a lightning strike into a ground loop that arcs across the room.</li>
+        <li>Trace where AC safety ground (green wire), RF/station ground, and lightning ground meet. Per NEC practice they should bond together at one point near where service/antenna grounds enter the structure.</li>
+      </ol>
+    </div>
+
+    <div class="subsec">
+      <h3>A.2 <span class="tag">— antenna system</span> Mast/Tower and Feedline Ground</h3>
+      <ol>
+        <li>Visually inspect the ground rod(s) at the antenna base for corrosion, a loose clamp, or exposed/nicked bonding wire.</li>
+        <li>Confirm the rod is bonded to the station ground with a short, direct run of at least #10 AWG copper wire or 3/4" copper strap — flat strap is preferred over round wire because it carries RF and transient surge current with less inductance.</li>
+        <li>Continuity test: meter between the antenna mount/mast and the ground rod clamp. Expect well under 1 Ω. A high or unstable reading means a corroded or loose bond — clean the contact point and retest.</li>
+        <li>If a ground resistance tester is available, measure the rod-to-earth resistance. Target ≤ 25 Ω (NEC minimum for a single rod), ideally ≤ 10 Ω for lightning protection. If it's high, bond in an additional rod at least 6 ft away.</li>
+        <li>Confirm a coax lightning arrestor/surge suppressor is inline on the feedline and its ground lug bonds to the same ground point — not a separate one.</li>
+        <li>Confirm there is a way to disconnect and ground the feedline when the station is not in use, particularly for portable/mobile setups during storm season.</li>
+      </ol>
+      <div class="callout warn">Common finding: a arrestor installed but its ground lead run to a nearby fence post or downspout instead of the station ground — this defeats the single-point ground and should be corrected on the spot.</div>
+    </div>
+
+    <div class="subsec">
+      <h3>A.3 <span class="tag">— transceiver</span> Chassis Ground</h3>
+      <ol>
+        <li>Locate the chassis ground lug on the rear panel (separate from the DC power or coax connections).</li>
+        <li>Confirm a dedicated ground strap runs from that lug directly to the station ground bus — the AC power cord's safety ground is not a substitute for this bond.</li>
+        <li>Keep the strap as short as physically possible, and well under a quarter-wavelength of the lowest operating frequency, so it can't become a resonant radiator and re-introduce RF into the shack. Flat braid is preferred over round wire for the same low-inductance reason as A.2.</li>
+        <li>Check the mounting point is bare metal — no paint or anodizing under the lug — and the hardware (including a star washer) is tight.</li>
+        <li>Continuity test chassis-to-ground-bus: expect well under 1 Ω.</li>
+      </ol>
+    </div>
+
+    <div class="subsec">
+      <h3>A.4 <span class="tag">— tuner</span> Antenna Tuner Ground</h3>
+      <ol>
+        <li>Locate the tuner's dedicated ground terminal — separate from the coax shield connection.</li>
+        <li>Confirm it bonds directly to the station ground bus with a short, heavy strap. Many external tuners rely on this connection as part of the RF counterpoise, especially when matching a random-wire or end-fed antenna — it is not just a safety ground.</li>
+        <li>If the operator reports the tuner can no longer find a match on a band it used to tune cleanly, check this bond first before suspecting the antenna itself — a lost or corroded tuner ground is the most common cause.</li>
+        <li>For end-fed or random-wire antennas, confirm the counterpoise wire(s) specified by the tuner's manual are present, undamaged, and connected — the tuner ground alone is rarely sufficient without them.</li>
+      </ol>
+    </div>
+
+    <div class="subsec">
+      <h3>A.5 <span class="tag">— associated equipment</span> Power Supplies, Amplifiers, Switches &amp; Interfaces</h3>
+      <ol>
+        <li>Bond the metal chassis of every associated item — power supply, amplifier, coax switch, digital-mode/logging interface — to the same ground bus used in A.3. Never give one item its own independent ground rod; two ground points at different potentials is how ground loops and hum/RFI get introduced.</li>
+        <li>For a coax switch, verify the body is grounded and check continuity through each position, not just the one currently in use.</li>
+        <li>For a computer interface used for digital modes or NetLog-style logging, note whether it is opto-isolated. A non-isolated interface is a common source of RF feedback and ground-loop hum and may need an isolation transformer or ferrite choking added.</li>
+      </ol>
+    </div>
+
+    <div class="subsec">
+      <h3>A.6 <span class="tag">— safety</span> Precautions While Testing</h3>
+      <ol>
+        <li>Never test or work on the grounding system during a thunderstorm or when lightning is possible in the area.</li>
+        <li>De-energize the station before disconnecting or disturbing any bonding strap.</li>
+        <li>Use insulated gloves and insulated-handle tools when probing near an energized station.</li>
+        <li>After any known lightning event near the station, re-inspect and re-test the entire ground system in full before returning the station to service.</li>
+      </ol>
+    </div>
+
+    <div class="subsec">
+      <h3>A.7 <span class="tag">— record</span> Verification Log</h3>
+      <div class="log-table-wrap">
+        <table class="log-table">
+          <thead><tr><th style="width:30%">Point Tested</th><th style="width:18%">Reading</th><th style="width:16%">Result</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><input type="text" data-key="g-p1" placeholder="Antenna mast → ground rod"></td>
+              <td><input type="text" data-key="g-r1" placeholder="Ω"></td>
+              <td><select data-key="g-s1"><option value=""></option><option>Pass</option><option>Fail</option></select></td>
+              <td><input type="text" data-key="g-n1"></td>
+            </tr>
+            <tr>
+              <td><input type="text" data-key="g-p2" placeholder="Ground rod → earth"></td>
+              <td><input type="text" data-key="g-r2" placeholder="Ω"></td>
+              <td><select data-key="g-s2"><option value=""></option><option>Pass</option><option>Fail</option></select></td>
+              <td><input type="text" data-key="g-n2"></td>
+            </tr>
+            <tr>
+              <td><input type="text" data-key="g-p3" placeholder="Transceiver chassis → bus"></td>
+              <td><input type="text" data-key="g-r3" placeholder="Ω"></td>
+              <td><select data-key="g-s3"><option value=""></option><option>Pass</option><option>Fail</option></select></td>
+              <td><input type="text" data-key="g-n3"></td>
+            </tr>
+            <tr>
+              <td><input type="text" data-key="g-p4" placeholder="Tuner ground → bus"></td>
+              <td><input type="text" data-key="g-r4" placeholder="Ω"></td>
+              <td><select data-key="g-s4"><option value=""></option><option>Pass</option><option>Fail</option></select></td>
+              <td><input type="text" data-key="g-n4"></td>
+            </tr>
+            <tr>
+              <td><input type="text" data-key="g-p5" placeholder="Other equipment → bus"></td>
+              <td><input type="text" data-key="g-r5" placeholder="Ω"></td>
+              <td><select data-key="g-s5"><option value=""></option><option>Pass</option><option>Fail</option></select></td>
+              <td><input type="text" data-key="g-n5"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <footer class="note">
+    Suggested cadence: re-examine at least annually, and after any change of equipment, antenna, or installation location. Retain a copy with the flotilla's facility records and forward per your District's process.
+  </footer>
+
+</div>
+
+<script>
+(function(){
+  var STORE_KEY = 'radio-facility-inspection-v1';
+  var data = {};
+  try { data = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch(e) { data = {}; }
+
+  function save(){
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); } catch(e) {}
+  }
+
+  document.querySelectorAll('[data-key]').forEach(function(el){
+    var key = el.getAttribute('data-key');
+    if (el.type === 'checkbox'){
+      if (data[key]) el.checked = true;
+      el.addEventListener('change', function(){ data[key] = el.checked; save(); });
+    } else {
+      if (data[key] !== undefined) el.value = data[key];
+      el.addEventListener('input', function(){ data[key] = el.value; save(); });
+      el.addEventListener('change', function(){ data[key] = el.value; save(); });
+    }
+  });
+
+  document.querySelectorAll('.stamp').forEach(function(btn){
+    var state = btn.getAttribute('data-state');
+    if (data['result'] === state) btn.setAttribute('aria-pressed','true');
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('.stamp').forEach(function(b){ b.setAttribute('aria-pressed','false'); });
+      btn.setAttribute('aria-pressed','true');
+      data['result'] = state;
+      save();
+    });
+  });
+
+  document.getElementById('printBtn').addEventListener('click', function(){ window.print(); });
+  document.getElementById('resetBtn').addEventListener('click', function(){
+    if (confirm('Clear all entries on this device?')){
+      try { localStorage.removeItem(STORE_KEY); } catch(e) {}
+      location.reload();
+    }
+  });
+})();
+</script>
