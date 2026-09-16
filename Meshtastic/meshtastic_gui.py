@@ -8,13 +8,15 @@ Usage:
 """
 
 import base64
+import csv
 import os
 import queue
 import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from datetime import datetime
+from tkinter import ttk, messagebox, filedialog
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -25,8 +27,10 @@ from mesh_client import (
     PSK_MODES, describe_psk, encode_psk,
 )
 import firmware as fw
+import printing
 
 FIRMWARE_CACHE_DIR = os.path.join(BASE, "firmware_cache")
+REPORT_CACHE_DIR = os.path.join(BASE, "report_cache")
 
 # ── Cross-platform font families ─────────────────────────────────────────────
 if sys.platform == "darwin":
@@ -208,8 +212,11 @@ class App(tk.Tk):
         self.fw_path = None
 
         self.ble_queue: "queue.Queue" = queue.Queue()
+        self.printer_queue: "queue.Queue" = queue.Queue()
 
         self._channels_cache: dict = {}
+
+        self._connect_attempt = 0
 
         self._closing = False
 
@@ -239,6 +246,7 @@ class App(tk.Tk):
         self.tab_settings = ttk.Frame(nb)
         self.tab_firmware = ttk.Frame(nb)
         self.tab_mqtt = ttk.Frame(nb)
+        self.tab_report = ttk.Frame(nb)
         self.tab_log = ttk.Frame(nb)
         nb.add(self.tab_conn, text="Connection")
         nb.add(self.tab_msgs, text="Messages")
@@ -246,6 +254,7 @@ class App(tk.Tk):
         nb.add(self.tab_settings, text="Settings")
         nb.add(self.tab_firmware, text="Firmware")
         nb.add(self.tab_mqtt, text="MQTT")
+        nb.add(self.tab_report, text="Report")
         nb.add(self.tab_log, text="Log")
 
         self._build_connection_tab()
@@ -254,7 +263,15 @@ class App(tk.Tk):
         self._build_settings_tab()
         self._build_firmware_tab()
         self._build_mqtt_tab()
+        self._build_report_tab()
         self._build_log_tab()
+
+        self.notebook = nb
+        nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _on_tab_changed(self, _event=None):
+        if self.notebook.select() == str(self.tab_report):
+            self._refresh_report()
 
     def _build_statusbar(self):
         bar = tk.Frame(self, bd=1, relief="sunken")
@@ -382,6 +399,14 @@ class App(tk.Tk):
             self.status_var.set("Ready")
             messagebox.showerror("BLE Scan Failed", str(payload))
 
+    # BLE needs far more headroom than serial/TCP: its own scan takes ~10s, GATT
+    # negotiation/bonding adds more, and syncing a full NodeDB over BLE's low
+    # throughput can legitimately take a long time on a mesh with many nodes —
+    # confirmed by hand (a real BLE connect took ~40s to fully complete). A short
+    # timeout here doesn't just report a hang, it actively kills good connections
+    # right before they finish.
+    CONNECT_TIMEOUT_MS = {"serial": 25000, "tcp": 25000, "ble": 120000}
+
     def _on_connect(self):
         kind = self.conn_kind.get()
         try:
@@ -405,8 +430,28 @@ class App(tk.Tk):
             return
         self.status_var.set("Connecting…")
         self.btn_connect.config(state="disabled")
+        self._connect_attempt += 1
+        timeout_ms = self.CONNECT_TIMEOUT_MS.get(kind, 25000)
+        self.after(timeout_ms, lambda a=self._connect_attempt, t=timeout_ms: self._check_connect_timeout(a, t))
+
+    def _check_connect_timeout(self, attempt: int, timeout_ms: int):
+        # A connection attempt can still hang indefinitely past its allotted time
+        # with no 'connected' or 'error' event ever arriving. Without this, the
+        # Connect button would stay disabled forever with no way to recover
+        # short of restarting the app.
+        if attempt != self._connect_attempt or self.client.is_connected():
+            return
+        self.client.disconnect()
+        self.status_var.set("Connection timed out")
+        messagebox.showerror(
+            "Connection Timed Out",
+            f"No response after {timeout_ms // 1000}s. The device may be out of range, already "
+            "connected elsewhere, not currently advertising (BLE devices often only advertise "
+            "briefly after power-on to save battery), or not yet paired in Windows Bluetooth settings."
+        )
 
     def _on_disconnect(self):
+        self._connect_attempt += 1  # invalidate any pending connect-timeout check
         self.client.disconnect()
 
     # ── Messages tab ─────────────────────────────────────────────────────
@@ -1107,6 +1152,171 @@ class App(tk.Tk):
         self.status_var.set("Saving MQTT settings…")
         self.client.save_mqtt_settings(settings)
 
+    # ── Report tab ───────────────────────────────────────────────────────
+    def _build_report_tab(self):
+        f = self.tab_report
+
+        top = tk.Frame(f)
+        top.pack(fill="x", padx=8, pady=8)
+        tk.Button(top, text="Refresh", font=FA, command=self._refresh_report).pack(side="left")
+        tk.Button(top, text="Print…", font=FB, bg="#2E7D32", fg="white", padx=14,
+                   command=self._print_report).pack(side="left", padx=8)
+        tk.Button(top, text="Save as CSV…", font=FB, padx=14,
+                   command=self._export_report_csv).pack(side="left", padx=(0, 16))
+
+        tk.Label(top, text="Printer:", font=FA).pack(side="left")
+        self.printer_choice = ttk.Combobox(top, font=FA, width=28, state="readonly")
+        self.printer_choice.pack(side="left", padx=6)
+        self.btn_refresh_printers = tk.Button(top, text="Refresh Printers", font=FA,
+                                                command=self._refresh_printers)
+        self.btn_refresh_printers.pack(side="left")
+        self._refresh_printers()
+
+        self.report_text = tk.Text(f, font=FMONO, state="disabled", wrap="none")
+        self.report_text.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _build_report_rows(self):
+        """[(section, field, value), ...] pulled live from the Connection,
+        Settings, and MQTT tabs — the single source for both the on-screen
+        preview and the Print/CSV exports, so they can never drift apart."""
+        rows = []
+        info = self.connected_info or {}
+
+        rows.append(("Connection", "Status", "Connected" if self.client.is_connected() else "Disconnected"))
+        rows.append(("Connection", "Long Name", info.get("long_name", "—")))
+        rows.append(("Connection", "Short Name", info.get("short_name", "—")))
+        rows.append(("Connection", "Node ID", info.get("node_id", "—")))
+        rows.append(("Connection", "Hardware", info.get("hw_model", "—")))
+        rows.append(("Connection", "Firmware", info.get("firmware", "—")))
+        rows.append(("Connection", "Board", info.get("pio_env", "—")))
+        rows.append(("Connection", "Battery", self.info_labels["battery"].cget("text")))
+
+        rows.append(("Settings", "Long Name", self.set_long_name.get()))
+        rows.append(("Settings", "Short Name", self.set_short_name.get()))
+        rows.append(("Settings", "Bluetooth PIN", self.set_pin.get()))
+        rows.append(("Settings", "Device Role", self.set_role.get()))
+        rows.append(("Settings", "LoRa Region", self.set_region.get()))
+        for idx, ch in sorted(self._channels_cache.items()):
+            prefix = f"Channel {idx}"
+            rows.append(("Settings", f"{prefix} Role", ch["role"]))
+            rows.append(("Settings", f"{prefix} Name", ch["name"] or "—"))
+            rows.append(("Settings", f"{prefix} Encryption", describe_psk(ch["psk"])))
+            rows.append(("Settings", f"{prefix} Uplink", "Yes" if ch["uplink_enabled"] else "No"))
+            rows.append(("Settings", f"{prefix} Downlink", "Yes" if ch["downlink_enabled"] else "No"))
+            rows.append(("Settings", f"{prefix} Position Precision", ch["position_precision"]))
+            rows.append(("Settings", f"{prefix} Muted", "Yes" if ch["is_muted"] else "No"))
+
+        rows.append(("MQTT", "Enabled", "Yes" if self.mqtt_enabled.get() else "No"))
+        rows.append(("MQTT", "Address", self.mqtt_address.get()))
+        rows.append(("MQTT", "Username", self.mqtt_username.get()))
+        # Redacted by default — this report may end up printed or saved to a shared
+        # file, and the plaintext credential isn't needed to see the config shape.
+        rows.append(("MQTT", "Password", "•••••• (set)" if self.mqtt_password.get() else "—"))
+        rows.append(("MQTT", "Root Topic", self.mqtt_root.get()))
+        rows.append(("MQTT", "Encryption Enabled", "Yes" if self.mqtt_encryption.get() else "No"))
+        rows.append(("MQTT", "JSON Enabled", "Yes" if self.mqtt_json.get() else "No"))
+        rows.append(("MQTT", "TLS Enabled", "Yes" if self.mqtt_tls.get() else "No"))
+        rows.append(("MQTT", "Proxy to Client Enabled", "Yes" if self.mqtt_proxy.get() else "No"))
+        rows.append(("MQTT", "Map Reporting Enabled", "Yes" if self.mqtt_map_enabled.get() else "No"))
+        rows.append(("MQTT", "Map Should Report Location", "Yes" if self.mqtt_map_report_location.get() else "No"))
+        rows.append(("MQTT", "Map Publish Interval (secs)", self.mqtt_map_interval.get()))
+        rows.append(("MQTT", "Map Position Precision", self.mqtt_map_precision.get()))
+        return rows
+
+    def _report_as_text(self, rows) -> str:
+        lines = [f"Meshtastic Device Report — {datetime.now():%Y-%m-%d %H:%M:%S}", ""]
+        section = None
+        for sect, field, value in rows:
+            if sect != section:
+                section = sect
+                lines.append(f"[{section}]")
+            lines.append(f"  {field}: {value}")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _refresh_printers(self):
+        # Listing printers shells out to PowerShell, which can take upward of
+        # 15+ seconds to spin up on a loaded machine — never run that on the
+        # GUI thread, or the whole app freezes for that long on every refresh
+        # (including the first one, at startup).
+        self.btn_refresh_printers.config(state="disabled")
+        self.printer_choice.set("Loading…")
+
+        def worker():
+            try:
+                names = printing.list_printers()
+                default = printing.get_default_printer()
+                self.printer_queue.put(("printers_loaded", (names, default)))
+            except Exception as exc:
+                self.printer_queue.put(("printers_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True, name="printer-list").start()
+
+    def _handle_printer_event(self, kind: str, payload):
+        self.btn_refresh_printers.config(state="normal")
+        if kind == "printers_loaded":
+            names, default = payload
+            self.printer_choice["values"] = [printing.SYSTEM_DEFAULT] + names
+            if default and default in names:
+                self.printer_choice.set(default)
+            else:
+                self.printer_choice.current(0)
+        elif kind == "printers_error":
+            self.printer_choice["values"] = [printing.SYSTEM_DEFAULT]
+            self.printer_choice.current(0)
+            self._append_log(f"Could not list printers: {payload}")
+
+    def _refresh_report(self):
+        text = self._report_as_text(self._build_report_rows())
+        self.report_text.config(state="normal")
+        self.report_text.delete("1.0", "end")
+        self.report_text.insert("1.0", text)
+        self.report_text.config(state="disabled")
+
+    def _print_report(self):
+        self._refresh_report()
+        text = self.report_text.get("1.0", "end")
+        printer = self.printer_choice.get()
+        try:
+            os.makedirs(REPORT_CACHE_DIR, exist_ok=True)
+            path = os.path.join(REPORT_CACHE_DIR, f"report_{datetime.now():%Y%m%d_%H%M%S}.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            if sys.platform == "win32":
+                printing.print_file(path, printer)
+                label = printer if printer and printer != printing.SYSTEM_DEFAULT else "default printer"
+                self.status_var.set(f"Sent to {label}: {path}")
+            else:
+                messagebox.showinfo(
+                    "Printing Not Supported",
+                    f"Direct printing is only wired up for Windows. The report was saved to:\n{path}"
+                )
+        except OSError as exc:
+            messagebox.showerror(
+                "Print Failed",
+                f"Could not print to '{printer}':\n{exc}"
+            )
+
+    def _export_report_csv(self):
+        self._refresh_report()
+        default_name = f"meshtastic_report_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        path = filedialog.asksaveasfilename(
+            title="Save Report As", initialdir=BASE, initialfile=default_name,
+            defaultextension=".csv", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["Section", "Field", "Value"])
+                writer.writerows(self._build_report_rows())
+        except OSError as exc:
+            messagebox.showerror("Save Failed", str(exc))
+            return
+        self.status_var.set(f"Report saved: {path}")
+        messagebox.showinfo("Saved", f"Report saved to:\n{path}")
+
     # ── Log tab ──────────────────────────────────────────────────────────
     MAX_LOG_LINES = 1000
 
@@ -1172,6 +1382,14 @@ class App(tk.Tk):
             except queue.Empty:
                 break
             self._handle_ble_event(kind, payload)
+            if self._closing:
+                return
+        while True:
+            try:
+                kind, payload = self.printer_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_printer_event(kind, payload)
             if self._closing:
                 return
         # If the queue is still backed up, come back quickly instead of waiting a full
@@ -1247,6 +1465,7 @@ class App(tk.Tk):
             self.esp_frame.pack_forget()
 
         elif kind == "disconnected":
+            self._connect_attempt += 1  # invalidate any pending connect-timeout check
             self.connected_info = None
             self.hdr_status.config(text="Disconnected", fg="#FF8080")
             self.status_var.set("Disconnected")

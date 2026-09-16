@@ -26,7 +26,10 @@ requirements/
 NetLog_Audit_Report_2.md
 netlog-1.py
 
-# Meshtastic: downloaded firmware images and driver installers (build/runtime
-# artifacts, not source)
+# Meshtastic: downloaded firmware images, driver installers, generated
+# reports, and local secrets (build/runtime artifacts, not source)
 Meshtastic/firmware_cache/
+Meshtastic/report_cache/
+Meshtastic/meshtastic_report_*.csv
+Meshtastic/pw.txt
 *.exe

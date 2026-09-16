@@ -91,6 +91,26 @@ def node_display_name(node: dict) -> str:
     return user.get("longName") or user.get("shortName") or user.get("id") or "?"
 
 
+def _describe_connect_error(kind: str, exc: Exception) -> str:
+    """
+    Turn a raw connection exception into something actionable. BLE in
+    particular fails with an opaque bleak/WinRT error when Windows hasn't
+    bonded with the device yet — the fix lives in Windows Bluetooth settings,
+    not in this app, so say so instead of just dumping the exception text.
+    """
+    text = str(exc)
+    if kind == "ble" and ("Insufficient Authentication" in text or "Access Denied" in text):
+        return (
+            "Connection failed: Windows has not paired/bonded with this BLE device yet "
+            "(GATT error: insufficient authentication).\n\n"
+            "Fix: open Windows Settings → Bluetooth & devices → Add device → Bluetooth, "
+            "select the Meshtastic device, and enter its Bluetooth PIN when prompted "
+            "(set on the Settings tab — default is a 6-digit fixed PIN). "
+            "Once Windows shows it as \"Paired\", reconnect from here."
+        )
+    return f"Connection failed: {exc}"
+
+
 class MeshClient:
     """
     Manages one meshtastic interface at a time and reports state changes /
@@ -139,7 +159,7 @@ class MeshClient:
                 self.interface = iface
                 self.kind = kind
             except Exception as exc:  # noqa: BLE001 - surface any failure to the GUI
-                self.events.put(("error", f"Connection failed: {exc}"))
+                self.events.put(("error", _describe_connect_error(kind, exc)))
                 self.events.put(("disconnected", None))
 
         threading.Thread(target=worker, daemon=True, name="mesh-connect").start()
