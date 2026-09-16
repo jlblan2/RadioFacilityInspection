@@ -404,8 +404,11 @@ class App(tk.Tk):
     # throughput can legitimately take a long time on a mesh with many nodes —
     # confirmed by hand (a real BLE connect took ~40s to fully complete). A short
     # timeout here doesn't just report a hang, it actively kills good connections
-    # right before they finish.
-    CONNECT_TIMEOUT_MS = {"serial": 25000, "tcp": 25000, "ble": 120000}
+    # right before they finish. mesh_client also auto-retries flaky BLE connects
+    # up to twice internally, so this needs enough room for all of those too —
+    # otherwise this watchdog can fire while a retry that would have succeeded
+    # is still in flight, force-disconnecting out from under it.
+    CONNECT_TIMEOUT_MS = {"serial": 25000, "tcp": 25000, "ble": 180000}
 
     def _on_connect(self):
         kind = self.conn_kind.get()
@@ -602,6 +605,15 @@ class App(tk.Tk):
         self.set_region = ttk.Combobox(form, font=FA, width=20, state="readonly", values=REGION_OPTIONS)
         self.set_region.grid(row=4, column=1, sticky="w", padx=8)
 
+        tk.Label(form, text="BLE Advertising Timeout (secs):", font=FA).grid(
+            row=5, column=0, sticky="w", padx=8, pady=6)
+        self.set_wait_bluetooth = tk.Entry(form, font=FA, width=10)
+        self.set_wait_bluetooth.grid(row=5, column=1, sticky="w", padx=8)
+        tk.Label(form, text="How long after boot the device advertises over BLE before going quiet to "
+                            "save battery. Set a large value (e.g. 4294967295) so it stays discoverable.",
+                  font=FS, fg=DIM_FG, wraplength=420, justify="left").grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+
         btns = tk.Frame(f)
         btns.pack(fill="x", padx=8, pady=(0, 8))
         self.btn_save_settings = tk.Button(btns, text="Save Changes", font=FB, bg="#2E7D32", fg="white",
@@ -660,6 +672,7 @@ class App(tk.Tk):
         self.set_pin.delete(0, "end"); self.set_pin.insert(0, str(s["fixed_pin"]))
         self.set_role.set(s["role"])
         self.set_region.set(s["region"])
+        self.set_wait_bluetooth.delete(0, "end"); self.set_wait_bluetooth.insert(0, str(s["wait_bluetooth_secs"]))
         self.btn_save_settings.config(state="normal")
         self.btn_discard_settings.config(state="normal")
 
@@ -670,6 +683,11 @@ class App(tk.Tk):
             fixed_pin = int(self.set_pin.get().strip())
         except ValueError:
             messagebox.showwarning("Invalid PIN", "Bluetooth PIN must be numeric.")
+            return
+        try:
+            wait_bluetooth_secs = int(self.set_wait_bluetooth.get().strip())
+        except ValueError:
+            messagebox.showwarning("Invalid Value", "BLE Advertising Timeout must be numeric.")
             return
         role = self.set_role.get()
         region = self.set_region.get()
@@ -687,6 +705,7 @@ class App(tk.Tk):
             fixed_pin=fixed_pin,
             role=role,
             region=region,
+            wait_bluetooth_secs=wait_bluetooth_secs,
         )
 
     def _factory_reset(self):
@@ -1196,6 +1215,7 @@ class App(tk.Tk):
         rows.append(("Settings", "Bluetooth PIN", self.set_pin.get()))
         rows.append(("Settings", "Device Role", self.set_role.get()))
         rows.append(("Settings", "LoRa Region", self.set_region.get()))
+        rows.append(("Settings", "BLE Advertising Timeout (secs)", self.set_wait_bluetooth.get()))
         for idx, ch in sorted(self._channels_cache.items()):
             prefix = f"Channel {idx}"
             rows.append(("Settings", f"{prefix} Role", ch["role"]))

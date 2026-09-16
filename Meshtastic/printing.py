@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
 Windows printer helpers for the Report tab: list installed printers and send
-a file to a specific one — the shell's plain "print" verb (and os.startfile)
-always goes to whatever Windows has set as the default, with no way to target
-a different printer, so this uses the "printto" verb instead when one is chosen.
+a file to a specific one.
 
-Printer enumeration goes straight through the Win32 Print Spooler API
-(winspool.drv) via ctypes rather than shelling out to PowerShell's Get-Printer:
-launching powershell.exe to run one cmdlet was observed taking 15-30+ seconds
-on a real machine, while the native API call is sub-millisecond — it's a
-direct in-process call, no new process involved at all.
+Both operations go straight through the Win32 Print Spooler API
+(winspool.drv) via ctypes rather than shelling out to PowerShell or using
+ShellExecute's "print"/"printto" shell verbs:
+
+  - Enumeration: launching powershell.exe to run Get-Printer was observed
+    taking 15-30+ seconds on a real machine, while the native API call is
+    sub-millisecond — it's a direct in-process call, no new process at all.
+  - Printing: the "printto" verb depends on the .txt file association's
+    handler (normally Notepad) correctly parsing printer/driver/port
+    arguments off its command line — in practice that failed with
+    ERROR_INVALID_DATA even against a printer that genuinely exists.
+    Opening the printer directly and writing the job's bytes to it works
+    the same regardless of file associations.
 """
 
 import ctypes
@@ -27,6 +33,14 @@ class _PRINTER_INFO_4(ctypes.Structure):
         ("pPrinterName", wintypes.LPWSTR),
         ("pServerName", wintypes.LPWSTR),
         ("Attributes", wintypes.DWORD),
+    ]
+
+
+class _DOC_INFO_1(ctypes.Structure):
+    _fields_ = [
+        ("pDocName", wintypes.LPWSTR),
+        ("pOutputFile", wintypes.LPWSTR),
+        ("pDatatype", wintypes.LPWSTR),
     ]
 
 
@@ -72,16 +86,50 @@ def get_default_printer():
 
 def print_file(path: str, printer: str = None) -> None:
     """
-    Print `path` on Windows. If `printer` is given (and isn't SYSTEM_DEFAULT),
-    targets that printer specifically via the shell's "printto" verb;
-    otherwise uses "print" (whatever Windows has set as the default).
+    Print a text file's contents on Windows via OpenPrinter/StartDocPrinter/
+    WritePrinter, targeting `printer` by name — or the Windows default if
+    `printer` is None/SYSTEM_DEFAULT.
     """
     if sys.platform != "win32":
         raise OSError("Printing is only implemented for Windows.")
-    target = printer if printer and printer != SYSTEM_DEFAULT else None
-    verb = "printto" if target else "print"
-    params = f'"{target}"' if target else None
-    # Last arg 0 = SW_HIDE, so the transient print-handler window doesn't flash on screen.
-    result = ctypes.windll.shell32.ShellExecuteW(None, verb, path, params, None, 0)
-    if result <= 32:  # per ShellExecute docs: >32 means success
-        raise OSError(f"ShellExecute failed (code {result}) — is a printer configured?")
+
+    target = printer if printer and printer != SYSTEM_DEFAULT else get_default_printer()
+    if not target:
+        raise OSError("No printer selected and no Windows default printer is set.")
+
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    # "RAW" bytes go straight through to the printer/port untouched — this is
+    # the same technique `copy file.txt \\server\printer` has relied on for
+    # decades, and it's near-universally supported. "TEXT" looked like the
+    # more proper choice, but many drivers don't actually implement it (it
+    # failed outright — ERROR_INVALID_DATATYPE — even against Microsoft's own
+    # "Print to PDF" driver), so this avoids relying on optional support.
+    # Plain ASCII/CRLF text has no escape sequences a printer language would
+    # misinterpret, so it prints as literal characters either way.
+    normalized = text.replace("\r\n", "\n").replace("\n", "\r\n")
+    data = normalized.encode("mbcs", errors="replace")
+
+    winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+    h_printer = wintypes.HANDLE()
+    if not winspool.OpenPrinterW(target, ctypes.byref(h_printer), None):
+        raise OSError(f"Could not open printer '{target}' (Windows error {ctypes.get_last_error()})")
+    try:
+        doc_info = _DOC_INFO_1(pDocName="Meshtastic Report", pOutputFile=None, pDatatype="RAW")
+        job_id = winspool.StartDocPrinterW(h_printer, 1, ctypes.byref(doc_info))
+        if not job_id:
+            raise OSError(f"StartDocPrinter failed (Windows error {ctypes.get_last_error()})")
+        try:
+            if not winspool.StartPagePrinter(h_printer):
+                raise OSError(f"StartPagePrinter failed (Windows error {ctypes.get_last_error()})")
+            try:
+                written = wintypes.DWORD(0)
+                buf = ctypes.create_string_buffer(data, len(data))
+                if not winspool.WritePrinter(h_printer, buf, len(data), ctypes.byref(written)):
+                    raise OSError(f"WritePrinter failed (Windows error {ctypes.get_last_error()})")
+            finally:
+                winspool.EndPagePrinter(h_printer)
+        finally:
+            winspool.EndDocPrinter(h_printer)
+    finally:
+        winspool.ClosePrinter(h_printer)

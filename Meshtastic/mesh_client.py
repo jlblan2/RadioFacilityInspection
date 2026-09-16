@@ -13,6 +13,7 @@ import base64
 import queue
 import re
 import threading
+import time
 import traceback
 
 from pubsub import pub
@@ -108,6 +109,17 @@ def _describe_connect_error(kind: str, exc: Exception) -> str:
             "(set on the Settings tab — default is a 6-digit fixed PIN). "
             "Once Windows shows it as \"Paired\", reconnect from here."
         )
+    if kind == "ble" and "Error writing BLE" in text:
+        return (
+            "Connection failed: the BLE link connected but writing to the device failed.\n\n"
+            "This has been seen even when Windows already shows the device as \"Paired\" — "
+            "the pairing bond can go stale (e.g. after the device reboots or its Bluetooth "
+            "stack resets) while Windows still thinks it's valid.\n\n"
+            "Fix: in Windows Settings → Bluetooth & devices, remove/forget this device, "
+            "then pair it again from scratch and reconnect from here. Also confirm nothing "
+            "else (the Meshtastic phone app, another PC) is already connected to it — a BLE "
+            "peripheral only accepts one active connection at a time."
+        )
     return f"Connection failed: {exc}"
 
 
@@ -146,21 +158,37 @@ class MeshClient:
         self._connect("tcp", lambda: meshtastic.tcp_interface.TCPInterface(hostname=hostname, portNumber=port))
 
     def connect_ble(self, address: str | None):
-        self._connect("ble", lambda: meshtastic.ble_interface.BLEInterface(address=address))
+        # BLE on Windows has repeatedly proven flaky in practice: a connect attempt
+        # (or the GATT write right after) fails once, then an immediate retry with
+        # the exact same address succeeds — seen firsthand multiple times against
+        # real hardware. Serial/TCP don't show this pattern, so only BLE retries.
+        self._connect("ble", lambda: meshtastic.ble_interface.BLEInterface(address=address), retries=2)
 
-    def _connect(self, kind: str, factory):
+    def _connect(self, kind: str, factory, retries: int = 0):
         if self.interface is not None:
             raise RuntimeError("Already connected — disconnect first")
         self._ensure_subscribed()
 
         def worker():
-            try:
-                iface = factory()
-                self.interface = iface
-                self.kind = kind
-            except Exception as exc:  # noqa: BLE001 - surface any failure to the GUI
-                self.events.put(("error", _describe_connect_error(kind, exc)))
-                self.events.put(("disconnected", None))
+            attempt = 0
+            while True:
+                try:
+                    iface = factory()
+                    self.interface = iface
+                    self.kind = kind
+                    return
+                except Exception as exc:  # noqa: BLE001 - surface any failure to the GUI
+                    if attempt < retries:
+                        attempt += 1
+                        self.events.put((
+                            "log",
+                            f"{kind} connect attempt failed ({exc}); retrying ({attempt}/{retries})…",
+                        ))
+                        time.sleep(2)
+                        continue
+                    self.events.put(("error", _describe_connect_error(kind, exc)))
+                    self.events.put(("disconnected", None))
+                    return
 
         threading.Thread(target=worker, daemon=True, name="mesh-connect").start()
 
@@ -226,9 +254,11 @@ class MeshClient:
             "fixed_pin": lc.bluetooth.fixed_pin,
             "role": config_pb2.Config.DeviceConfig.Role.Name(lc.device.role),
             "region": config_pb2.Config.LoRaConfig.RegionCode.Name(lc.lora.region),
+            "wait_bluetooth_secs": lc.power.wait_bluetooth_secs,
         }
 
-    def save_device_settings(self, long_name: str, short_name: str, fixed_pin: int, role: str, region: str):
+    def save_device_settings(self, long_name: str, short_name: str, fixed_pin: int, role: str, region: str,
+                              wait_bluetooth_secs: int):
         """
         Push a settings change to the device. Runs on a background thread —
         each admin round-trip can take a couple of seconds — and reports
@@ -249,6 +279,8 @@ class MeshClient:
                 node.writeConfig("device")
                 node.localConfig.lora.region = config_pb2.Config.LoRaConfig.RegionCode.Value(region)
                 node.writeConfig("lora")
+                node.localConfig.power.wait_bluetooth_secs = int(wait_bluetooth_secs)
+                node.writeConfig("power")
                 node.commitSettingsTransaction()
                 self.events.put(("settings_saved", None))
             except Exception as exc:
