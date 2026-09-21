@@ -27,6 +27,7 @@ from mesh_client import (
     PSK_MODES, describe_psk, encode_psk,
 )
 import firmware as fw
+import netdiscovery
 import printing
 
 FIRMWARE_CACHE_DIR = os.path.join(BASE, "firmware_cache")
@@ -213,6 +214,7 @@ class App(tk.Tk):
 
         self.ble_queue: "queue.Queue" = queue.Queue()
         self.printer_queue: "queue.Queue" = queue.Queue()
+        self.tcp_queue: "queue.Queue" = queue.Queue()
 
         self._channels_cache: dict = {}
 
@@ -246,6 +248,7 @@ class App(tk.Tk):
         self.tab_settings = ttk.Frame(nb)
         self.tab_firmware = ttk.Frame(nb)
         self.tab_mqtt = ttk.Frame(nb)
+        self.tab_network = ttk.Frame(nb)
         self.tab_report = ttk.Frame(nb)
         self.tab_log = ttk.Frame(nb)
         nb.add(self.tab_conn, text="Connection")
@@ -254,6 +257,7 @@ class App(tk.Tk):
         nb.add(self.tab_settings, text="Settings")
         nb.add(self.tab_firmware, text="Firmware")
         nb.add(self.tab_mqtt, text="MQTT")
+        nb.add(self.tab_network, text="Network")
         nb.add(self.tab_report, text="Report")
         nb.add(self.tab_log, text="Log")
 
@@ -263,6 +267,7 @@ class App(tk.Tk):
         self._build_settings_tab()
         self._build_firmware_tab()
         self._build_mqtt_tab()
+        self._build_network_tab()
         self._build_report_tab()
         self._build_log_tab()
 
@@ -288,7 +293,7 @@ class App(tk.Tk):
         top.pack(fill="x", **pad)
 
         self.conn_kind = tk.StringVar(value="serial")
-        for label, val in [("Serial (USB)", "serial"), ("TCP / WiFi", "tcp"), ("Bluetooth LE", "ble")]:
+        for label, val in [("Serial (USB)", "serial"), ("TCP / Ethernet / WiFi", "tcp"), ("Bluetooth LE", "ble")]:
             tk.Radiobutton(top, text=label, variable=self.conn_kind, value=val, font=FA,
                             command=self._refresh_conn_fields).pack(side="left", padx=(0, 16))
 
@@ -305,13 +310,27 @@ class App(tk.Tk):
         # -- tcp fields --
         self.tcp_frame = tk.Frame(self.conn_fields)
         tk.Label(self.tcp_frame, text="Host:", font=FA).grid(row=0, column=0, sticky="w")
-        self.tcp_host = tk.Entry(self.tcp_frame, width=30, font=FA)
+        self.tcp_host = ttk.Combobox(self.tcp_frame, width=28, font=FA)  # editable: type an IP or pick a discovered one
         self.tcp_host.insert(0, "meshtastic.local")
         self.tcp_host.grid(row=0, column=1, padx=6)
         tk.Label(self.tcp_frame, text="Port:", font=FA).grid(row=0, column=2, sticky="w")
         self.tcp_port = tk.Entry(self.tcp_frame, width=8, font=FA)
         self.tcp_port.insert(0, "4403")
         self.tcp_port.grid(row=0, column=3, padx=6)
+        self.btn_tcp_discover = tk.Button(self.tcp_frame, text="Discover", font=FA, command=self._discover_tcp)
+        self.btn_tcp_discover.grid(row=0, column=4)
+        tk.Label(self.tcp_frame,
+                  text="Ethernet requirement: the Meshtastic unit must be connected to a router or switch "
+                       "with DHCP, or have a static IP address assigned\n(on the device, with the PC on the "
+                       "same subnet). A direct cable to the PC has no DHCP, so the unit won't get an address.\n"
+                       "Note: some firmware (e.g. ESP32 units such as the ThinkNode M7, v2.7.26) applies a static "
+                       "address to WiFi only and always uses DHCP on Ethernet.",
+                  font=FB, fg=ERR_RED, justify="left").grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        tk.Label(self.tcp_frame,
+                  text="Works over Ethernet or WiFi. Enter the unit's IP address, or \"Meshtastic.local\" (the unit "
+                       "announces that name on the network; it can take a few seconds to resolve) —\nDiscover looks "
+                       "for devices listening on port 4403 on this PC's networks.",
+                  font=FS, fg=DIM_FG, justify="left").grid(row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
         # -- ble fields --
         self.ble_frame = tk.Frame(self.conn_fields)
@@ -399,6 +418,37 @@ class App(tk.Tk):
             self.status_var.set("Ready")
             messagebox.showerror("BLE Scan Failed", str(payload))
 
+    def _discover_tcp(self):
+        # Sweeps subnets and waits on mDNS — several seconds of blocking network
+        # I/O, so it runs off the GUI thread like the BLE scan does.
+        self.btn_tcp_discover.config(state="disabled")
+        self.status_var.set("Looking for Meshtastic devices on port 4403…")
+
+        def worker():
+            try:
+                self.tcp_queue.put(("tcp_discover_done", netdiscovery.discover_tcp_devices()))
+            except Exception as exc:
+                self.tcp_queue.put(("tcp_discover_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True, name="tcp-discover").start()
+
+    def _handle_tcp_event(self, kind: str, payload):
+        self.btn_tcp_discover.config(state="normal")
+        if kind == "tcp_discover_done":
+            self.tcp_host["values"] = payload
+            if payload:
+                self.tcp_host.set(payload[0])
+                self.status_var.set(f"Found {len(payload)} device(s) listening on port 4403")
+            else:
+                self.status_var.set(
+                    "No device is listening on port 4403 on this PC's networks. Is Ethernet/WiFi enabled "
+                    "on the device, and is it on the same network (or does the cable have a DHCP server "
+                    "on the other end)?"
+                )
+        elif kind == "tcp_discover_error":
+            self.status_var.set("Ready")
+            messagebox.showerror("Discover Failed", str(payload))
+
     # BLE needs far more headroom than serial/TCP: its own scan takes ~10s, GATT
     # negotiation/bonding adds more, and syncing a full NodeDB over BLE's low
     # throughput can legitimately take a long time on a mesh with many nodes —
@@ -408,7 +458,11 @@ class App(tk.Tk):
     # up to twice internally, so this needs enough room for all of those too —
     # otherwise this watchdog can fire while a retry that would have succeeded
     # is still in flight, force-disconnecting out from under it.
-    CONNECT_TIMEOUT_MS = {"serial": 25000, "tcp": 25000, "ble": 180000}
+    # Serial/TCP: the library's handshake alone waits up to 30s, and a unit that just
+    # rebooted is slow to answer — a 25s watchdog used to give up first while the
+    # abandoned attempt kept the COM port open. (mesh_client now cancels and releases
+    # an attempt the GUI gives up on, so a timeout can no longer wedge later connects.)
+    CONNECT_TIMEOUT_MS = {"serial": 60000, "tcp": 60000, "ble": 180000}
 
     def _on_connect(self):
         kind = self.conn_kind.get()
@@ -1171,6 +1225,137 @@ class App(tk.Tk):
         self.status_var.set("Saving MQTT settings…")
         self.client.save_mqtt_settings(settings)
 
+    # ── Network tab ──────────────────────────────────────────────────────
+    NET_FIELDS = [("ip", "IP Address:"), ("subnet", "Subnet Mask:"),
+                  ("gateway", "Gateway (optional):"), ("dns", "DNS (optional):")]
+
+    def _build_network_tab(self):
+        f = self.tab_network
+
+        self.net_gate_note = tk.Label(f, text="", font=FB, justify="left", anchor="w", wraplength=900)
+        self.net_gate_note.pack(fill="x", padx=8, pady=(8, 0))
+
+        box = tk.LabelFrame(f, text="IPv4 Address Assignment", font=FB)
+        box.pack(fill="x", padx=8, pady=8)
+
+        self.net_mode = tk.StringVar(value="DHCP")
+        tk.Radiobutton(box, text="DHCP — the unit gets its address from a router/switch", font=FA,
+                        variable=self.net_mode, value="DHCP",
+                        command=self._on_net_mode_change).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 0))
+        tk.Radiobutton(box, text="Static — assign the address below", font=FA,
+                        variable=self.net_mode, value="STATIC",
+                        command=self._on_net_mode_change).grid(row=1, column=0, columnspan=2, sticky="w", padx=8)
+
+        self.net_entries = {}
+        for i, (key, label) in enumerate(self.NET_FIELDS, start=2):
+            tk.Label(box, text=label, font=FA).grid(row=i, column=0, sticky="w", padx=(28, 8), pady=4)
+            entry = tk.Entry(box, font=FA, width=20)
+            entry.grid(row=i, column=1, sticky="w", padx=8)
+            self.net_entries[key] = entry
+
+        tk.Label(box, text="Subnet mask: dotted (255.255.255.0) or prefix (/24). Gateway and DNS can be left "
+                           "blank on a direct PC-to-unit cable; a gateway must be inside the subnet.",
+                  font=FS, fg=DIM_FG, wraplength=860, justify="left").grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+        tk.Label(box, text="Caution — Ethernet: some firmware applies a static address to WiFi only and always "
+                           "uses DHCP on Ethernet (confirmed on the ThinkNode M7, v2.7.26: it took a DHCP lease "
+                           "with STATIC saved). After saving, check the address the unit actually took "
+                           "(Connection tab → TCP → Discover). For a fixed Ethernet address, keep DHCP and set a "
+                           "reservation for the unit's MAC on your router. A direct cable to this PC needs a DHCP "
+                           "server on the PC side (e.g. Windows Internet Connection Sharing) or a router/switch "
+                           "in between.",
+                  font=FB, fg=ERR_RED, wraplength=860, justify="left").grid(
+            row=7, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
+
+        self.net_link_var = tk.StringVar(value="")
+        tk.Label(f, textvariable=self.net_link_var, font=FS, fg=DIM_FG, anchor="w").pack(fill="x", padx=8)
+
+        btns = tk.Frame(f)
+        btns.pack(fill="x", padx=8, pady=8)
+        self.btn_save_network = tk.Button(btns, text="Save Changes", font=FB, bg="#2E7D32", fg="white",
+                                            padx=14, command=self._save_network_settings, state="disabled")
+        self.btn_save_network.pack(side="left")
+        self.btn_discard_network = tk.Button(btns, text="Discard Changes", font=FB, padx=14,
+                                               command=self._load_network_fields, state="disabled")
+        self.btn_discard_network.pack(side="left", padx=8)
+
+        self._on_net_mode_change()
+        self._update_network_gate()
+
+    def _network_ready(self) -> bool:
+        return self.client.is_connected() and self.client.kind == "serial"
+
+    def _update_network_gate(self):
+        """The IP can only be assigned over Serial (USB): changing it makes the
+        unit drop and re-acquire its network address, which would cut a TCP
+        session mid-write. Say so up front instead of failing at Save."""
+        if self._network_ready():
+            self.net_gate_note.config(text="Connected via Serial (USB) — ready to assign an address.", fg=OK_GRN)
+        elif self.client.is_connected():
+            self.net_gate_note.config(
+                text=f"Connected via {(self.client.kind or '?').upper()}. Assigning an IP address requires a "
+                     "Serial (USB) connection — reconnect over USB on the Connection tab.", fg=ERR_RED)
+        else:
+            self.net_gate_note.config(
+                text="Not connected. Connect to the unit via Serial (USB) on the Connection tab to assign an "
+                     "IP address.", fg=DIM_FG)
+        state = "normal" if self._network_ready() else "disabled"
+        self.btn_save_network.config(state=state)
+        self.btn_discard_network.config(state=state)
+
+    def _on_net_mode_change(self):
+        state = "normal" if self.net_mode.get() == "STATIC" else "disabled"
+        for entry in self.net_entries.values():
+            entry.config(state=state)
+
+    def _load_network_fields(self):
+        self._update_network_gate()
+        if not self.client.is_connected():
+            return
+        try:
+            s = self.client.get_network_settings()
+        except Exception as exc:
+            messagebox.showerror("Network", f"Could not read network settings: {exc}")
+            return
+        self.net_mode.set(s["address_mode"])
+        for key, entry in self.net_entries.items():
+            entry.config(state="normal")  # a disabled Entry silently ignores delete/insert
+            entry.delete(0, "end")
+            entry.insert(0, s[key])
+        self._on_net_mode_change()
+        self.net_link_var.set(
+            f"Device: Ethernet {'enabled' if s['eth_enabled'] else 'DISABLED'}  |  "
+            f"WiFi {'enabled' if s['wifi_enabled'] else 'disabled'}"
+            + ("   — Ethernet is off on this unit, so an address won't be usable until it's enabled."
+               if not s["eth_enabled"] else "")
+        )
+
+    def _save_network_settings(self):
+        if not self._network_ready():
+            self._update_network_gate()
+            return
+        mode = self.net_mode.get()
+        fields = {key: entry.get() for key, entry in self.net_entries.items()}
+        try:
+            self.client.validate_network_settings(mode, **fields)  # before asking the user to confirm anything
+        except ValueError as exc:
+            messagebox.showwarning("Invalid Address", str(exc))
+            return
+        summary = ("DHCP (address assigned by a router/switch)" if mode == "DHCP"
+                   else f"Static  {fields['ip'].strip()}  mask {fields['subnet'].strip()}")
+        if not messagebox.askyesno(
+                "Confirm Save",
+                f"Write this network configuration to the device?\n\n    {summary}\n\n"
+                "The device will reboot to apply it, and the serial connection will drop."):
+            return
+        try:
+            self.client.save_network_settings(mode, **fields)
+        except (ValueError, RuntimeError) as exc:
+            messagebox.showerror("Network", str(exc))
+            return
+        self.btn_save_network.config(state="disabled")
+        self.status_var.set("Saving network settings…")
+
     # ── Report tab ───────────────────────────────────────────────────────
     def _build_report_tab(self):
         f = self.tab_report
@@ -1412,6 +1597,14 @@ class App(tk.Tk):
             self._handle_printer_event(kind, payload)
             if self._closing:
                 return
+        while True:
+            try:
+                kind, payload = self.tcp_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_tcp_event(kind, payload)
+            if self._closing:
+                return
         # If the queue is still backed up, come back quickly instead of waiting a full
         # tick — keeps the UI responsive while draining a burst without starving it.
         delay = 10 if drained >= self.MAX_EVENTS_PER_TICK else POLL_MS
@@ -1468,6 +1661,7 @@ class App(tk.Tk):
             self.after(500, self._load_settings_fields)
             self.after(500, self._refresh_battery)
             self.after(500, self._load_mqtt_fields)
+            self.after(500, self._load_network_fields)
             self.after(500, self._refresh_channels)
             self.fw_current_var.set(
                 f"{payload['long_name']}  |  {payload['hw_model']}  |  "
@@ -1500,6 +1694,8 @@ class App(tk.Tk):
             self.btn_discard_settings.config(state="disabled")
             self.btn_save_mqtt.config(state="disabled")
             self.btn_discard_mqtt.config(state="disabled")
+            self.net_link_var.set("")
+            self._update_network_gate()
             self._channels_cache = {}
             for row in self.channel_tree.get_children():
                 self.channel_tree.delete(row)
@@ -1513,6 +1709,7 @@ class App(tk.Tk):
             self.btn_connect.config(state="normal")
             self.btn_save_settings.config(state="normal" if self.client.is_connected() else "disabled")
             self.btn_save_mqtt.config(state="normal" if self.client.is_connected() else "disabled")
+            self._update_network_gate()
             messagebox.showerror("Meshtastic Error", str(payload))
 
         elif kind == "settings_saved":
@@ -1526,6 +1723,16 @@ class App(tk.Tk):
             self.btn_save_mqtt.config(state="normal")
             self._append_log("MQTT settings saved")
             messagebox.showinfo("MQTT", "MQTT settings saved to device.")
+
+        elif kind == "network_saved":
+            self.status_var.set("Network settings saved — the device is rebooting")
+            self._append_log("Network settings saved")
+            self._update_network_gate()
+            messagebox.showinfo(
+                "Network",
+                "Network settings saved to the device. It will reboot to apply them — "
+                "reconnect once it's back up."
+            )
 
         elif kind == "channel_saved":
             self.status_var.set(f"Channel {payload} saved")
