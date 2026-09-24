@@ -1487,15 +1487,9 @@ class App(tk.Tk):
             path = os.path.join(REPORT_CACHE_DIR, f"report_{datetime.now():%Y%m%d_%H%M%S}.txt")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(text)
-            if sys.platform == "win32":
-                printing.print_file(path, printer)
-                label = printer if printer and printer != printing.SYSTEM_DEFAULT else "default printer"
-                self.status_var.set(f"Sent to {label}: {path}")
-            else:
-                messagebox.showinfo(
-                    "Printing Not Supported",
-                    f"Direct printing is only wired up for Windows. The report was saved to:\n{path}"
-                )
+            printing.print_file(path, printer)
+            label = printer if printer and printer != printing.SYSTEM_DEFAULT else "default printer"
+            self.status_var.set(f"Sent to {label}: {path}")
         except OSError as exc:
             messagebox.showerror(
                 "Print Failed",

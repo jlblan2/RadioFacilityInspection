@@ -32,4 +32,5 @@ Meshtastic/firmware_cache/
 Meshtastic/report_cache/
 Meshtastic/meshtastic_report_*.csv
 Meshtastic/pw.txt
+Meshtastic/meshtastic_gui_dist.zip
 *.exe

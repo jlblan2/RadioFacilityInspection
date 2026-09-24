@@ -157,30 +157,101 @@ def extract_firmware_file(zip_url: str, board: str, version: str, dest_dir: str,
 
 
 # ── UF2 (nRF52840 / RP2040 / RP2350) flashing ───────────────────────────────
+#
+# A board in UF2 bootloader mode enumerates as an ordinary USB mass-storage
+# drive; copying the .uf2 file onto it triggers the flash. Detection is
+# platform-specific because "what's currently mounted" has no common API:
+#   - Windows: every drive letter, via GetLogicalDrives.
+#   - macOS: every entry under /Volumes (removable/external media mounts
+#     there; the boot volume itself normally doesn't).
+#   - Linux: removable block devices with a mountpoint, via `lsblk`, with a
+#     fallback to scanning the desktop auto-mount locations directly in case
+#     lsblk is missing (minimal distros) or its JSON output can't be parsed.
 
 DRIVE_REMOVABLE = 2
 
 
 def _mounted_drive_roots():
-    """All currently mounted drive letters, as 'X:\\' roots."""
-    if sys.platform != "win32":
-        return []
-    bitmask = ctypes.windll.kernel32.GetLogicalDrives()
-    return [f"{letter}:\\" for i, letter in enumerate(string.ascii_uppercase) if bitmask & (1 << i)]
+    """All currently mounted candidate volume roots, as OS-native paths."""
+    if sys.platform == "win32":
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        return [f"{letter}:\\" for i, letter in enumerate(string.ascii_uppercase) if bitmask & (1 << i)]
+    if sys.platform == "darwin":
+        try:
+            return [os.path.join("/Volumes", name) for name in os.listdir("/Volumes") if not name.startswith(".")]
+        except OSError:
+            return []
+    if sys.platform.startswith("linux"):
+        return [root for root, _label in _linux_removable_mounts()]
+    return []
+
+
+def _linux_removable_mounts():
+    """[(mountpoint, label), ...] for currently mounted removable block devices."""
+    try:
+        proc = subprocess.run(
+            ["lsblk", "--json", "--output", "MOUNTPOINT,RM,LABEL"],
+            capture_output=True, text=True, timeout=10,
+        )
+        data = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return _linux_removable_mounts_fallback()
+
+    results = []
+
+    def walk(devices):
+        for d in devices:
+            if str(d.get("rm")).lower() in ("1", "true") and d.get("mountpoint"):
+                results.append((d["mountpoint"], d.get("label") or "(no label)"))
+            walk(d.get("children") or [])
+
+    walk(data.get("blockdevices", []))
+    return results or _linux_removable_mounts_fallback()
+
+
+def _linux_removable_mounts_fallback():
+    """
+    Used when lsblk is unavailable or unparsable: scan the mount points
+    desktop environments actually use for auto-mounted removable media —
+    /media/<user>/<label> (most distros) or /media/<label>, and the same
+    under /run/media on some (e.g. Fedora). Not restricted to removable
+    devices here since there's no metadata to check; a false positive just
+    means a stray entry in the manual-selection fallback list.
+    """
+    results = []
+    for base in ("/media", "/run/media"):
+        if not os.path.isdir(base):
+            continue
+        try:
+            entries = list(os.scandir(base))
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            try:
+                nested = [e for e in os.scandir(entry.path) if e.is_dir()]
+            except OSError:
+                nested = []
+            if nested:  # /media/<user>/<label>
+                results.extend((e.path, e.name) for e in nested)
+            else:  # /media/<label>
+                results.append((entry.path, entry.name))
+    return results
 
 
 def find_uf2_drives():
-    """Return drive roots (e.g. 'D:\\\\') currently mounted in UF2 bootloader
-    mode — they expose an INFO_UF2.TXT marker file at their root."""
+    """Return drive roots currently mounted in UF2 bootloader mode — they
+    expose an INFO_UF2.TXT marker file at their root."""
     drives = []
     for root in _mounted_drive_roots():
         try:
             if os.path.isfile(os.path.join(root, "INFO_UF2.TXT")):
                 drives.append(root)
         except OSError:
-            # A drive letter can be mounted but not ready (empty card reader slot,
-            # a stale network mapping, etc.) — skip it instead of aborting the
-            # whole scan, or a single unrelated bad drive hides the real one.
+            # A drive can be "mounted" but not actually ready (empty card
+            # reader slot, a stale network mapping, etc.) — skip it instead of
+            # aborting the whole scan, or one unrelated bad drive hides the real one.
             continue
     return drives
 
@@ -192,20 +263,24 @@ def list_removable_drives():
     bootloaders are slow to write that marker, or use a variant that omits it,
     so this lets the user pick the drive manually.
     """
-    if sys.platform != "win32":
-        return []
-    results = []
-    for root in _mounted_drive_roots():
-        try:
-            if ctypes.windll.kernel32.GetDriveTypeW(root) != DRIVE_REMOVABLE:
-                continue
-            label_buf = ctypes.create_unicode_buffer(261)
-            ctypes.windll.kernel32.GetVolumeInformationW(root, label_buf, 260, None, None, None, None, 0)
-            label = label_buf.value or "(no label)"
-        except OSError:
-            label = "(unreadable)"
-        results.append((root, label))
-    return results
+    if sys.platform == "win32":
+        results = []
+        for root in _mounted_drive_roots():
+            try:
+                if ctypes.windll.kernel32.GetDriveTypeW(root) != DRIVE_REMOVABLE:
+                    continue
+                label_buf = ctypes.create_unicode_buffer(261)
+                ctypes.windll.kernel32.GetVolumeInformationW(root, label_buf, 260, None, None, None, None, 0)
+                label = label_buf.value or "(no label)"
+            except OSError:
+                label = "(unreadable)"
+            results.append((root, label))
+        return results
+    if sys.platform == "darwin":
+        return [(root, os.path.basename(root)) for root in _mounted_drive_roots()]
+    if sys.platform.startswith("linux"):
+        return _linux_removable_mounts()
+    return []
 
 
 def flash_uf2(firmware_path: str, drive_root: str) -> str:

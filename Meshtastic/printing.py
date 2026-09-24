@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Windows printer helpers for the Report tab: list installed printers and send
-a file to a specific one.
+Cross-platform printer helpers for the Report tab: list installed printers
+and send a file to a specific one.
 
-Both operations go straight through the Win32 Print Spooler API
-(winspool.drv) via ctypes rather than shelling out to PowerShell or using
-ShellExecute's "print"/"printto" shell verbs:
+Windows goes straight through the Win32 Print Spooler API (winspool.drv) via
+ctypes rather than shelling out to PowerShell or using ShellExecute's
+"print"/"printto" shell verbs:
 
   - Enumeration: launching powershell.exe to run Get-Printer was observed
     taking 15-30+ seconds on a real machine, while the native API call is
@@ -16,38 +16,120 @@ ShellExecute's "print"/"printto" shell verbs:
     ERROR_INVALID_DATA even against a printer that genuinely exists.
     Opening the printer directly and writing the job's bytes to it works
     the same regardless of file associations.
+
+macOS and Linux both ship CUPS, so those go through its `lpstat`/`lp`
+command-line tools instead — there's no ctypes equivalent to a system DLL
+there, and `lp` already knows how to spool a plain text file correctly.
 """
 
-import ctypes
+import re
+import subprocess
 import sys
-from ctypes import wintypes
 
 SYSTEM_DEFAULT = "(System Default)"
 
-PRINTER_ENUM_LOCAL = 0x00000002
-PRINTER_ENUM_CONNECTIONS = 0x00000004
-
-
-class _PRINTER_INFO_4(ctypes.Structure):
-    _fields_ = [
-        ("pPrinterName", wintypes.LPWSTR),
-        ("pServerName", wintypes.LPWSTR),
-        ("Attributes", wintypes.DWORD),
-    ]
-
-
-class _DOC_INFO_1(ctypes.Structure):
-    _fields_ = [
-        ("pDocName", wintypes.LPWSTR),
-        ("pOutputFile", wintypes.LPWSTR),
-        ("pDatatype", wintypes.LPWSTR),
-    ]
+_POSIX = sys.platform == "darwin" or sys.platform.startswith("linux")
 
 
 def list_printers() -> list:
-    """Names of installed/connected printers, or [] on non-Windows or failure."""
-    if sys.platform != "win32":
-        return []
+    """Names of installed/connected printers, or [] on an unsupported platform or failure."""
+    if sys.platform == "win32":
+        return _win_list_printers()
+    if _POSIX:
+        return _cups_list_printers()
+    return []
+
+
+def get_default_printer():
+    """The OS default printer's name, or None if it can't be determined."""
+    if sys.platform == "win32":
+        return _win_get_default_printer()
+    if _POSIX:
+        return _cups_get_default_printer()
+    return None
+
+
+def print_file(path: str, printer: str = None) -> None:
+    """
+    Print `path` (a plain text file). If `printer` is given (and isn't
+    SYSTEM_DEFAULT), targets that printer specifically; otherwise uses
+    whichever the OS has set as the default.
+    """
+    if sys.platform == "win32":
+        return _win_print_file(path, printer)
+    if _POSIX:
+        return _cups_print_file(path, printer)
+    raise OSError(f"Printing is not implemented for platform '{sys.platform}'.")
+
+
+# ── macOS / Linux (CUPS command-line tools) ─────────────────────────────────
+
+# `lpstat -p` prints one line per printer, e.g.:
+#   printer Brother_MFC_L2750DW_series is idle.  enabled since Tue 01 Jan 2026...
+# This format has been stable across CUPS versions on both macOS and Linux.
+_LPSTAT_PRINTER_RE = re.compile(r"^printer\s+(\S+)\s+is\b", re.MULTILINE)
+# `lpstat -d` prints either "system default destination: <name>" or
+# "no system default destination".
+_LPSTAT_DEFAULT_RE = re.compile(r"system default destination:\s*(\S+)")
+
+
+def _cups_list_printers() -> list:
+    try:
+        proc = subprocess.run(["lpstat", "-p"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []  # no CUPS client tools installed, or nothing to report
+    return _LPSTAT_PRINTER_RE.findall(proc.stdout)
+
+
+def _cups_get_default_printer():
+    try:
+        proc = subprocess.run(["lpstat", "-d"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = _LPSTAT_DEFAULT_RE.search(proc.stdout)
+    return m.group(1) if m else None
+
+
+def _cups_print_file(path: str, printer: str = None) -> None:
+    cmd = ["lp"]
+    if printer and printer != SYSTEM_DEFAULT:
+        cmd += ["-d", printer]
+    cmd.append(path)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise OSError("'lp' was not found — is CUPS (cups-client) installed?") from None
+    except subprocess.SubprocessError as exc:
+        raise OSError(f"Could not run 'lp': {exc}") from exc
+    if proc.returncode != 0:
+        raise OSError((proc.stderr or proc.stdout or f"lp exited with status {proc.returncode}").strip())
+
+
+# ── Windows (Win32 Print Spooler API) ───────────────────────────────────────
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    PRINTER_ENUM_LOCAL = 0x00000002
+    PRINTER_ENUM_CONNECTIONS = 0x00000004
+
+    class _PRINTER_INFO_4(ctypes.Structure):
+        _fields_ = [
+            ("pPrinterName", wintypes.LPWSTR),
+            ("pServerName", wintypes.LPWSTR),
+            ("Attributes", wintypes.DWORD),
+        ]
+
+    class _DOC_INFO_1(ctypes.Structure):
+        _fields_ = [
+            ("pDocName", wintypes.LPWSTR),
+            ("pOutputFile", wintypes.LPWSTR),
+            ("pDatatype", wintypes.LPWSTR),
+        ]
+
+
+def _win_list_printers() -> list:
     try:
         winspool = ctypes.WinDLL("winspool.drv")
         flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS
@@ -66,10 +148,7 @@ def list_printers() -> list:
         return []
 
 
-def get_default_printer():
-    """The Windows default printer's name, or None if it can't be determined."""
-    if sys.platform != "win32":
-        return None
+def _win_get_default_printer():
     try:
         winspool = ctypes.WinDLL("winspool.drv")
         size = wintypes.DWORD(0)
@@ -84,16 +163,13 @@ def get_default_printer():
         return None
 
 
-def print_file(path: str, printer: str = None) -> None:
+def _win_print_file(path: str, printer: str = None) -> None:
     """
-    Print a text file's contents on Windows via OpenPrinter/StartDocPrinter/
-    WritePrinter, targeting `printer` by name — or the Windows default if
-    `printer` is None/SYSTEM_DEFAULT.
+    Print a text file's contents via OpenPrinter/StartDocPrinter/WritePrinter,
+    targeting `printer` by name — or the Windows default if `printer` is
+    None/SYSTEM_DEFAULT.
     """
-    if sys.platform != "win32":
-        raise OSError("Printing is only implemented for Windows.")
-
-    target = printer if printer and printer != SYSTEM_DEFAULT else get_default_printer()
+    target = printer if printer and printer != SYSTEM_DEFAULT else _win_get_default_printer()
     if not target:
         raise OSError("No printer selected and no Windows default printer is set.")
 
