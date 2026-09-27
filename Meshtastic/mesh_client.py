@@ -303,6 +303,11 @@ class MeshClient:
         self._pending = None
         self._pending_attempt = None
         self._releasing: list = []
+        # Which channel index each node was last heard transmitting on. The
+        # NodeDB itself carries no such field (confirmed against real
+        # hardware — a node isn't inherently "on" one channel), but every
+        # received packet is, so this is built up live as traffic arrives.
+        self.node_channels: dict = {}
 
     # ── connection management ────────────────────────────────────────────
     def connect_serial(self, dev_path: str | None):
@@ -438,6 +443,7 @@ class MeshClient:
             pending, self._pending, self._pending_attempt = self._pending, None, None
             iface, self.interface = self.interface, None
             self.kind = None
+        self.node_channels = {}  # don't carry a previous device's channel history into the next session
         self._release_async(iface, pending, wait=3.0)
         self.events.put(("disconnected", None))
 
@@ -803,6 +809,7 @@ class MeshClient:
                 return
             self.interface = None
             self.kind = None
+        self.node_channels = {}
         # The unit rebooted or was unplugged. Dropping the reference isn't enough:
         # make sure its port handle is actually closed so reconnecting works.
         self._release_async(interface)
@@ -813,9 +820,21 @@ class MeshClient:
             return
         self.events.put(("node_updated", node))
 
+    def _track_node_channel(self, packet: dict):
+        # Channel 0 is protobuf's zero-value, so MessageToDict() drops the "channel"
+        # key entirely for anything received on the primary channel -- the same
+        # reason _on_receive_text below defaults it to 0 rather than treating a
+        # missing key as "unknown". Without this default, every packet on the
+        # primary channel (most real traffic) was silently discarded here.
+        from_id = packet.get("fromId")
+        channel = packet.get("channel", 0)
+        if from_id:
+            self.node_channels[from_id] = channel
+
     def _on_receive_text(self, packet, interface):
         if interface is not self.interface:
             return
+        self._track_node_channel(packet)
         decoded = packet.get("decoded", {})
         self.events.put(("text", {
             "from_id": packet.get("fromId", "?"),
@@ -840,10 +859,17 @@ class MeshClient:
     def _on_receive(self, packet, interface):
         if interface is not self.interface:
             return
+        self._track_node_channel(packet)
         portnum = packet.get("decoded", {}).get("portnum")
         if portnum == "TEXT_MESSAGE_APP":
             return  # already handled by _on_receive_text
         self.events.put(("packet", packet))
+
+    def get_node_channels(self) -> dict:
+        """{node_id: channel_index} for every node heard on this connection so
+        far, from the channel field of its received packets (the NodeDB has
+        no per-node channel field of its own)."""
+        return dict(self.node_channels)
 
     def _on_log_line(self, line, interface=None):
         if interface is not None and interface is not self.interface:

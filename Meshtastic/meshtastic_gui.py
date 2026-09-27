@@ -577,24 +577,90 @@ class App(tk.Tk):
         self.node_count_var = tk.StringVar(value="0 nodes")
         tk.Label(top, textvariable=self.node_count_var, font=FS, fg=DIM_FG).pack(side="left", padx=10)
 
-        cols = ("short", "long", "id", "hw", "battery", "snr", "heard")
-        headers = {"short": "Short", "long": "Long Name", "id": "Node ID", "hw": "Hardware",
-                   "battery": "Batt %", "snr": "SNR", "heard": "Last Heard"}
+        tk.Label(top, text="Channel:", font=FA).pack(side="left", padx=(16, 0))
+        self.node_channel_lookup: dict = {}
+        self.node_channel = ttk.Combobox(top, width=22, font=FA, state="readonly")
+        self.node_channel.pack(side="left", padx=6)
+        tk.Label(top, text="(double-click a node to message it on this channel; Refresh filters the "
+                           "list to nodes heard on it)",
+                  font=FS, fg=DIM_FG).pack(side="left")
+
+        tk.Label(top, text="Click a column heading to sort.", font=FS, fg=DIM_FG).pack(side="right")
+
+        cols = ("short", "long", "id", "hw", "battery", "snr", "date", "heard")
+        self._node_headers = {"short": "Short", "long": "Long Name", "id": "Node ID", "hw": "Hardware",
+                                "battery": "Batt %", "snr": "SNR", "date": "Last Heard Date",
+                                "heard": "Last Heard Time"}
+        self._node_sort_col = None
+        self._node_sort_reverse = {}
         self.node_tree = ttk.Treeview(f, columns=cols, show="headings", height=18)
         for c in cols:
-            self.node_tree.heading(c, text=headers[c])
+            self.node_tree.heading(c, text=self._node_headers[c], command=lambda col=c: self._sort_node_tree(col))
             self.node_tree.column(c, width=110, anchor="w")
         self.node_tree.pack(fill="both", expand=True, padx=8, pady=8)
         self.node_tree.bind("<Double-1>", self._node_selected_as_dest)
 
+    def _sort_node_tree(self, col: str):
+        """Click-to-sort: toggles ascending/descending on repeated clicks of the
+        same column. Sorts numerically when every present value in the column
+        parses as a number (Batt %, SNR), otherwise case-insensitively as text;
+        rows with no value ("—") always sort to the end, in either direction."""
+        ascending = self._node_sort_reverse.get(col) is not False  # first click on a column = ascending
+        self._node_sort_reverse = {col: not ascending}
+        self._node_sort_col = col
+
+        def raw(iid):
+            v = self.node_tree.set(iid, col)
+            return None if v in ("—", "") else v
+
+        items = list(self.node_tree.get_children(""))
+        present = [(iid, raw(iid)) for iid in items if raw(iid) is not None]
+        missing = [iid for iid in items if raw(iid) is None]
+
+        numeric = True
+        for _, v in present:
+            try:
+                float(v)
+            except ValueError:
+                numeric = False
+                break
+        key = (lambda pair: float(pair[1])) if numeric else (lambda pair: pair[1].lower())
+        present.sort(key=key, reverse=not ascending)
+
+        for index, iid in enumerate([iid for iid, _ in present] + missing):
+            self.node_tree.move(iid, "", index)
+
+        arrow = " ▲" if ascending else " ▼"  # ▲ / ▼
+        for c, label in self._node_headers.items():
+            self.node_tree.heading(c, text=label + (arrow if c == col else ""))
+
     def _refresh_nodes(self):
+        """Rebuilds the Nodes tab's list. If a specific channel (not "All
+        Channels") is selected in the Channel picker, shows only nodes whose
+        most-recently-received packet was on that channel — a live-tracked
+        association (see MeshClient.node_channels), since the NodeDB itself
+        doesn't record which channel a node is on."""
         nodes = self.client.get_nodes()
+        node_channels = self.client.get_node_channels()
+        selected_channel = self.node_channel_lookup.get(self.node_channel.get())
+
         for row in self.node_tree.get_children():
             self.node_tree.delete(row)
         self.node_lookup = {"Broadcast (all)": BROADCAST_ADDR}
+
+        shown = 0
         for node_id, node in nodes.items():
-            self._upsert_node_row(node_id, node)
-        self.node_count_var.set(f"{len(nodes)} node(s)")
+            # Every known node stays a valid message destination regardless of
+            # the display filter below -- only what's SHOWN in the list is filtered.
+            self.node_lookup[node_display_name(node)] = node.get("user", {}).get("id", node_id)
+            if selected_channel is None or node_channels.get(node_id) == selected_channel:
+                self._upsert_node_row(node_id, node)
+                shown += 1
+
+        if selected_channel is None:
+            self.node_count_var.set(f"{len(nodes)} node(s)")
+        else:
+            self.node_count_var.set(f"{shown} of {len(nodes)} node(s) on channel {self.node_channel.get()}")
         self.msg_dest["values"] = list(self.node_lookup.keys())
 
     def _refresh_battery(self):
@@ -607,6 +673,9 @@ class App(tk.Tk):
         user = node.get("user", {})
         metrics = node.get("deviceMetrics", {})
         last_heard = node.get("lastHeard")
+        # Zero-padded ISO order (YYYY-MM-DD, HH:MM:SS) so the plain string also
+        # sorts correctly chronologically via the column-header click-to-sort.
+        date_str = time.strftime("%Y-%m-%d", time.localtime(last_heard)) if last_heard else "—"
         heard_str = time.strftime("%H:%M:%S", time.localtime(last_heard)) if last_heard else "—"
         values = (
             user.get("shortName", "—"),
@@ -615,6 +684,7 @@ class App(tk.Tk):
             user.get("hwModel", "—"),
             metrics.get("batteryLevel", "—"),
             node.get("snr", "—"),
+            date_str,
             heard_str,
         )
         if self.node_tree.exists(node_id):
@@ -630,8 +700,16 @@ class App(tk.Tk):
             return
         values = self.node_tree.item(sel[0], "values")
         long_name = values[1]
-        if long_name in self.node_lookup:
-            self.msg_dest.set(long_name)
+        if long_name not in self.node_lookup:
+            return
+        self.msg_dest.set(long_name)
+        channel_label = self.node_channel.get()
+        channel_idx = self.node_channel_lookup.get(channel_label)
+        if channel_idx is not None:
+            self.msg_channel.set(channel_idx)
+            self.status_var.set(f"Messages tab: destination set to {long_name}, channel {channel_label}")
+        else:
+            self.status_var.set(f"Messages tab: destination set to {long_name}")
 
     # ── Settings tab ─────────────────────────────────────────────────────
     def _build_settings_tab(self):
@@ -793,6 +871,32 @@ class App(tk.Tk):
             ))
         self.btn_add_channel.config(state="normal")
         self._on_channel_select()
+        self._refresh_node_channel_choices()
+
+    def _refresh_node_channel_choices(self):
+        """
+        Populate the Nodes tab's channel picker with the device's actual
+        configured (non-DISABLED) channels, so both double-click-to-message
+        and the channel-filtered Refresh use a real channel name instead of a
+        bare 0-7 index. "All Channels" (-> None) turns off the Refresh filter
+        and is the default, so a first-time Refresh never looks like it lost
+        nodes before any traffic has been attributed to a channel yet.
+        """
+        previous = self.node_channel_lookup.get(self.node_channel.get())
+        available = sorted(
+            (c for c in self._channels_cache.values() if c["role"] != "DISABLED"),
+            key=lambda c: c["index"],
+        )
+        self.node_channel_lookup = {"All Channels": None}
+        self.node_channel_lookup.update(
+            (f"{c['index']}: {c['name'] or '(unnamed)'} ({c['role']})", c["index"]) for c in available
+        )
+        self.node_channel["values"] = list(self.node_channel_lookup)
+        if isinstance(previous, int) and previous in self.node_channel_lookup.values():
+            # keep the same channel selected across a refresh, not just its position in the list
+            self.node_channel.set(next(l for l, idx in self.node_channel_lookup.items() if idx == previous))
+        else:
+            self.node_channel.set("All Channels")
 
     def _on_channel_select(self, _event=None):
         sel = self.channel_tree.selection()
@@ -1696,6 +1800,9 @@ class App(tk.Tk):
             self.btn_add_channel.config(state="disabled")
             self.btn_edit_channel.config(state="disabled")
             self.btn_delete_channel.config(state="disabled")
+            self.node_channel_lookup = {}
+            self.node_channel["values"] = []
+            self.node_channel.set("")
 
         elif kind == "error":
             self.status_var.set(f"Error: {payload}")
