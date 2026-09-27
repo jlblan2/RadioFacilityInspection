@@ -587,9 +587,9 @@ class App(tk.Tk):
 
         tk.Label(top, text="Click a column heading to sort.", font=FS, fg=DIM_FG).pack(side="right")
 
-        cols = ("short", "long", "id", "hw", "battery", "snr", "date", "heard")
+        cols = ("short", "long", "id", "hw", "role", "battery", "snr", "date", "heard")
         self._node_headers = {"short": "Short", "long": "Long Name", "id": "Node ID", "hw": "Hardware",
-                                "battery": "Batt %", "snr": "SNR", "date": "Last Heard Date",
+                                "role": "Role", "battery": "Batt %", "snr": "SNR", "date": "Last Heard Date",
                                 "heard": "Last Heard Time"}
         self._node_sort_col = None
         self._node_sort_reverse = {}
@@ -682,6 +682,7 @@ class App(tk.Tk):
             user.get("longName", "—"),
             user.get("id", node_id),
             user.get("hwModel", "—"),
+            user.get("role", "—"),
             metrics.get("batteryLevel", "—"),
             node.get("snr", "—"),
             date_str,
