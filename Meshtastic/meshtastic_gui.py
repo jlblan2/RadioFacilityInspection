@@ -11,6 +11,7 @@ import base64
 import csv
 import html
 import json
+import math
 import os
 import queue
 import sys
@@ -35,6 +36,17 @@ import printing
 
 FIRMWARE_CACHE_DIR = os.path.join(BASE, "firmware_cache")
 REPORT_CACHE_DIR = os.path.join(BASE, "report_cache")
+
+_EARTH_RADIUS_MI = 3958.8
+
+
+def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in miles between two lat/lon points."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+    return 2 * _EARTH_RADIUS_MI * math.asin(math.sqrt(a))
 
 # __POINTS__ is replaced with a JSON array of {lat, lon, label, popup} before
 # writing this out -- kept as a literal token (not str.format) because the
@@ -636,10 +648,10 @@ class App(tk.Tk):
 
         tk.Label(top, text="Click a column heading to sort.", font=FS, fg=DIM_FG).pack(side="right")
 
-        cols = ("short", "long", "id", "hw", "role", "battery", "snr", "date", "heard")
+        cols = ("short", "long", "id", "hw", "role", "battery", "snr", "distance", "date", "heard")
         self._node_headers = {"short": "Short", "long": "Long Name", "id": "Node ID", "hw": "Hardware",
-                                "role": "Role", "battery": "Batt %", "snr": "SNR", "date": "Last Heard Date",
-                                "heard": "Last Heard Time"}
+                                "role": "Role", "battery": "Batt %", "snr": "SNR", "distance": "Distance (mi)",
+                                "date": "Last Heard Date", "heard": "Last Heard Time"}
         self._node_sort_col = None
         self._node_sort_reverse = {}
         self.node_tree = ttk.Treeview(f, columns=cols, show="headings", height=18)
@@ -718,6 +730,17 @@ class App(tk.Tk):
             return
         self.info_labels["battery"].config(text=format_battery(status["battery_level"], status["voltage"]))
 
+    def _my_position(self):
+        """(lat, lon) of the currently connected radio, read from its own
+        NodeDB entry, or None if not connected or no GPS fix yet."""
+        my_id = (self.connected_info or {}).get("node_id")
+        if not my_id:
+            return None
+        my_node = self.client.get_nodes().get(my_id)
+        if my_node is None:
+            return None
+        return self._node_position(my_node)
+
     def _upsert_node_row(self, node_id: str, node: dict):
         user = node.get("user", {})
         metrics = node.get("deviceMetrics", {})
@@ -726,6 +749,11 @@ class App(tk.Tk):
         # sorts correctly chronologically via the column-header click-to-sort.
         date_str = time.strftime("%Y-%m-%d", time.localtime(last_heard)) if last_heard else "—"
         heard_str = time.strftime("%H:%M:%S", time.localtime(last_heard)) if last_heard else "—"
+
+        my_pos = self._my_position()
+        node_pos = self._node_position(node)
+        dist_str = f"{_haversine_miles(*my_pos, *node_pos):.1f}" if my_pos and node_pos else "—"
+
         values = (
             user.get("shortName", "—"),
             user.get("longName", "—"),
@@ -734,6 +762,7 @@ class App(tk.Tk):
             user.get("role", "—"),
             metrics.get("batteryLevel", "—"),
             node.get("snr", "—"),
+            dist_str,
             date_str,
             heard_str,
         )
@@ -771,6 +800,7 @@ class App(tk.Tk):
         and the Esri tiles from their CDNs -- there's no bundled offline
         basemap."""
         nodes = self.client.get_nodes()
+        my_pos = self._my_position()
         points = []
         for node_id in self.node_tree.get_children():
             node = nodes.get(node_id)
@@ -784,10 +814,12 @@ class App(tk.Tk):
             last_heard = node.get("lastHeard")
             heard_str = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_heard))
                          if last_heard else "—")
+            dist_str = f"{_haversine_miles(*my_pos, lat, lon):.1f} mi" if my_pos else "—"
             popup = "<br>".join([
                 html.escape(node_display_name(node)),
                 html.escape(user.get("id", node_id)),
                 f"Role: {html.escape(user.get('role', '—'))}",
+                f"Distance: {html.escape(dist_str)}",
                 f"Last heard: {html.escape(heard_str)}",
             ])
             points.append({
