@@ -9,12 +9,15 @@ Usage:
 
 import base64
 import csv
+import html
+import math
 import os
 import queue
 import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from datetime import datetime
 from tkinter import ttk, messagebox, filedialog
 
@@ -32,6 +35,136 @@ import printing
 
 FIRMWARE_CACHE_DIR = os.path.join(BASE, "firmware_cache")
 REPORT_CACHE_DIR = os.path.join(BASE, "report_cache")
+
+def _nice_round(value: float) -> float:
+    """Smallest 'nice' number (1/2/5 x 10^n) that is >= value. Used to pick
+    graticule spacing and scale-bar length that read like a real map."""
+    if value <= 0:
+        return 0.01
+    magnitude = 10 ** math.floor(math.log10(value))
+    for mult in (1, 2, 5, 10):
+        step = mult * magnitude
+        if value <= step:
+            return step
+    return 10 * magnitude
+
+
+def _build_node_map_html(points: list) -> str:
+    """Renders `points` ([{'lat','lon','label','popup'}, ...]) as a fully
+    self-contained, offline SVG map -- no tile server, external font, or
+    script tag, since this has to work in the field with no internet access.
+    Positions use a local equirectangular projection (longitude scaled by
+    cos(mean latitude)), which makes 1 unit worth ~69 miles on EITHER axis --
+    that equivalence is what lets a single scale bar apply to the whole plot.
+    A lat/lon graticule and mile scale bar stand in for real basemap tiles."""
+    lats = [p["lat"] for p in points]
+    lons = [p["lon"] for p in points]
+    min_lat, max_lat = min(lats), max(lats)
+    min_lon, max_lon = min(lons), max(lons)
+    mean_lat = (min_lat + max_lat) / 2
+    lon_scale = math.cos(math.radians(mean_lat)) or 1e-6
+
+    def unit_xy(lat, lon):
+        return (lon - min_lon) * lon_scale, max_lat - lat  # y flipped: north-up
+
+    xs, ys = zip(*(unit_xy(p["lat"], p["lon"]) for p in points))
+    x_span = max(max(xs) - min(xs), 0.02)
+    y_span = max(max(ys) - min(ys), 0.02)
+
+    pad = max(x_span, y_span) * 0.18
+    x0, x1 = min(xs) - pad, max(xs) + pad
+    y0, y1 = min(ys) - pad, max(ys) + pad
+    x_span, y_span = x1 - x0, y1 - y0
+
+    # Keep the map from turning into a sliver when nodes are roughly lined up.
+    aspect = x_span / y_span
+    if aspect < 0.5:
+        extra = (y_span * 0.5 - x_span) / 2
+        x0 -= extra
+        x1 += extra
+        x_span = x1 - x0
+    elif aspect > 2.0:
+        extra = (x_span / 2.0 - y_span) / 2
+        y0 -= extra
+        y1 += extra
+        y_span = y1 - y0
+
+    canvas_w = 900.0
+    canvas_h = canvas_w * (y_span / x_span)
+    if canvas_h > 900:
+        canvas_h = 900.0
+        canvas_w = canvas_h * (x_span / y_span)
+    margin = 46
+    footer_h = 46
+
+    def px(lat, lon):
+        x, y = unit_xy(lat, lon)
+        return (margin + (x - x0) / x_span * (canvas_w - 2 * margin),
+                margin + (y - y0) / y_span * (canvas_h - 2 * margin))
+
+    svg = [f'<svg viewBox="0 0 {canvas_w:.0f} {canvas_h + footer_h:.0f}" '
+           f'xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">',
+           f'<rect x="0" y="0" width="{canvas_w:.0f}" height="{canvas_h + footer_h:.0f}" fill="#eef3f8"/>',
+           f'<rect x="{margin}" y="{margin}" width="{canvas_w - 2 * margin:.1f}" '
+           f'height="{canvas_h - 2 * margin:.1f}" fill="#f7fbff" stroke="#b8c6d6"/>']
+
+    lat_step = _nice_round((max_lat - min_lat + 2 * pad) / 6)
+    lon_deg_pad = pad / lon_scale
+    lon_step = _nice_round(((max_lon - min_lon) + 2 * lon_deg_pad) / 6)
+
+    lat_line = math.ceil((min_lat - pad) / lat_step) * lat_step
+    while lat_line <= max_lat + pad:
+        _, y = px(lat_line, min_lon)
+        if margin <= y <= canvas_h - margin:
+            svg.append(f'<line x1="{margin}" y1="{y:.1f}" x2="{canvas_w - margin:.1f}" y2="{y:.1f}" '
+                       f'stroke="#d6e0ea" stroke-width="1"/>')
+            svg.append(f'<text x="{margin - 6:.1f}" y="{y + 3:.1f}" font-size="10" fill="#5a6b7a" '
+                       f'text-anchor="end">{abs(lat_line):.3f}°{"N" if lat_line >= 0 else "S"}</text>')
+        lat_line += lat_step
+
+    lon_line = math.ceil((min_lon - lon_deg_pad) / lon_step) * lon_step
+    while lon_line <= max_lon + lon_deg_pad:
+        x, _ = px(min_lat, lon_line)
+        if margin <= x <= canvas_w - margin:
+            svg.append(f'<line x1="{x:.1f}" y1="{margin}" x2="{x:.1f}" y2="{canvas_h - margin:.1f}" '
+                       f'stroke="#d6e0ea" stroke-width="1"/>')
+            svg.append(f'<text x="{x:.1f}" y="{canvas_h - margin + 14:.1f}" font-size="10" fill="#5a6b7a" '
+                       f'text-anchor="middle">{abs(lon_line):.3f}°{"W" if lon_line < 0 else "E"}</text>')
+        lon_line += lon_step
+
+    for p in points:
+        cx, cy = px(p["lat"], p["lon"])
+        svg.append(f'<g><title>{html.escape(p["popup"])}</title>'
+                   f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="6" fill="#1565C0" stroke="white" stroke-width="1.5"/>'
+                   f'<text x="{cx + 9:.1f}" y="{cy + 4:.1f}" font-size="11" fill="#0d2a44">'
+                   f'{html.escape(p["label"])}</text></g>')
+
+    # 1 unit == ~69 miles on either axis (that's what the cos-latitude
+    # correction buys us), so the scale bar needs no separate x/y case.
+    bar_miles = _nice_round(x_span * 69 * 0.3)
+    bar_px = (bar_miles / 69.0) / x_span * (canvas_w - 2 * margin)
+    bar_y = canvas_h + 30
+    svg.append(f'<line x1="{margin}" y1="{bar_y}" x2="{margin + bar_px:.1f}" y2="{bar_y}" '
+               f'stroke="#333" stroke-width="2"/>')
+    svg.append(f'<text x="{margin}" y="{bar_y - 6}" font-size="11" fill="#333">'
+               f'{bar_miles:g} mi (approx.)</text>')
+    svg.append(f'<text x="{canvas_w - margin:.1f}" y="{bar_y - 6}" font-size="10" fill="#666" '
+               f'text-anchor="end">{len(points)} node(s) plotted — offline, no map tiles</text>')
+    svg.append('</svg>')
+
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Meshtastic Node Map</title>
+<style>
+  body {{ margin: 0; background: #eef3f8; font-family: Arial, sans-serif; }}
+  svg {{ display: block; width: 100%; height: auto; max-width: 1100px; margin: 0 auto; }}
+</style>
+</head>
+<body>
+{"".join(svg)}
+</body>
+</html>
+"""
 
 # ── Cross-platform font families ─────────────────────────────────────────────
 if sys.platform == "darwin":
@@ -574,6 +707,7 @@ class App(tk.Tk):
         top = tk.Frame(f)
         top.pack(fill="x", padx=8, pady=(8, 0))
         tk.Button(top, text="Refresh", font=FA, command=self._refresh_nodes).pack(side="left")
+        tk.Button(top, text="Show Map", font=FA, command=self._show_node_map).pack(side="left", padx=(8, 0))
         self.node_count_var = tk.StringVar(value="0 nodes")
         tk.Label(top, textvariable=self.node_count_var, font=FS, fg=DIM_FG).pack(side="left", padx=10)
 
@@ -694,6 +828,72 @@ class App(tk.Tk):
             self.node_tree.insert("", "end", iid=node_id, values=values)
         display = node_display_name(node)
         self.node_lookup[display] = user.get("id", node_id)
+
+    @staticmethod
+    def _node_position(node: dict):
+        """(lat, lon) in degrees from a node's last-known GPS fix, or None if
+        it has never reported one. Checks both the float 'latitude'/'longitude'
+        keys the meshtastic library derives and the raw '...I' (1e-7 degree)
+        keys, in case a library version only supplies the raw form. (0, 0) is
+        the device's no-fix default, not a real position, so it's treated as
+        missing."""
+        pos = node.get("position") or {}
+        lat = pos.get("latitude")
+        lon = pos.get("longitude")
+        if lat is None and "latitudeI" in pos:
+            lat = pos["latitudeI"] * 1e-7
+        if lon is None and "longitudeI" in pos:
+            lon = pos["longitudeI"] * 1e-7
+        if lat is None or lon is None or (lat == 0 and lon == 0):
+            return None
+        return lat, lon
+
+    def _show_node_map(self):
+        """Opens a self-contained, fully offline SVG map, in the default web
+        browser, plotting the last-known GPS position of every node currently
+        shown in the Nodes list (respects the Channel filter, since it reads
+        from the tree rather than the full NodeDB). No tile server or CDN --
+        see _build_node_map_html -- since this needs to work with no internet
+        access in the field."""
+        nodes = self.client.get_nodes()
+        points = []
+        for node_id in self.node_tree.get_children():
+            node = nodes.get(node_id)
+            if node is None:
+                continue
+            pos = self._node_position(node)
+            if pos is None:
+                continue
+            lat, lon = pos
+            user = node.get("user", {})
+            last_heard = node.get("lastHeard")
+            heard_str = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_heard))
+                         if last_heard else "—")
+            popup = "\n".join([
+                node_display_name(node),
+                user.get("id", node_id),
+                f"Role: {user.get('role', '—')}",
+                f"Last heard: {heard_str}",
+            ])
+            points.append({
+                "lat": lat, "lon": lon,
+                "label": user.get("shortName") or node_display_name(node),
+                "popup": popup,
+            })
+
+        if not points:
+            messagebox.showinfo("Show Map",
+                                  "None of the nodes currently displayed have a known GPS position yet.")
+            return
+
+        page = _build_node_map_html(points)
+        os.makedirs(REPORT_CACHE_DIR, exist_ok=True)
+        path = os.path.join(REPORT_CACHE_DIR, f"node_map_{datetime.now():%Y%m%d_%H%M%S}.html")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(page)
+        webbrowser.open(f"file://{path}")
+        self.status_var.set(f"Opened node map ({len(points)} of {len(self.node_tree.get_children())} "
+                              f"displayed node(s) have a known position): {path}")
 
     def _node_selected_as_dest(self, _event):
         sel = self.node_tree.selection()
