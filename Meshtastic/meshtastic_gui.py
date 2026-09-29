@@ -648,10 +648,10 @@ class App(tk.Tk):
 
         tk.Label(top, text="Click a column heading to sort.", font=FS, fg=DIM_FG).pack(side="right")
 
-        cols = ("short", "long", "id", "hw", "role", "battery", "snr", "distance", "date", "heard")
-        self._node_headers = {"short": "Short", "long": "Long Name", "id": "Node ID", "hw": "Hardware",
-                                "role": "Role", "battery": "Batt %", "snr": "SNR", "distance": "Distance (mi)",
-                                "date": "Last Heard Date", "heard": "Last Heard Time"}
+        cols = ("short", "long", "id", "channel", "hw", "role", "battery", "snr", "distance", "date", "heard")
+        self._node_headers = {"short": "Short", "long": "Long Name", "id": "Node ID", "channel": "Channel",
+                                "hw": "Hardware", "role": "Role", "battery": "Batt %", "snr": "SNR",
+                                "distance": "Distance (mi)", "date": "Last Heard Date", "heard": "Last Heard Time"}
         self._node_sort_col = None
         self._node_sort_reverse = {}
         self.node_tree = ttk.Treeview(f, columns=cols, show="headings", height=18)
@@ -741,6 +741,17 @@ class App(tk.Tk):
             return None
         return self._node_position(my_node)
 
+    def _channel_label(self, node_id: str) -> str:
+        """'<index>: <name>' for the channel this node's most-recently-received
+        packet arrived on (see MeshClient.node_channels), or '—' if we haven't
+        heard from it yet this connection -- the NodeDB itself doesn't record
+        a node's channel, so this is only as complete as live traffic so far."""
+        idx = self.client.get_node_channels().get(node_id)
+        if idx is None:
+            return "—"
+        name = self._channels_cache.get(idx, {}).get("name")
+        return f"{idx}: {name}" if name else str(idx)
+
     def _upsert_node_row(self, node_id: str, node: dict):
         user = node.get("user", {})
         metrics = node.get("deviceMetrics", {})
@@ -758,6 +769,7 @@ class App(tk.Tk):
             user.get("shortName", "—"),
             user.get("longName", "—"),
             user.get("id", node_id),
+            self._channel_label(user.get("id", node_id)),
             user.get("hwModel", "—"),
             user.get("role", "—"),
             metrics.get("batteryLevel", "—"),
