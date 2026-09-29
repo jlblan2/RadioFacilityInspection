@@ -1519,6 +1519,30 @@ class App(tk.Tk):
                   font=FB, fg=ERR_RED, wraplength=860, justify="left").grid(
             row=7, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 8))
 
+        wifi_box = tk.LabelFrame(f, text="WiFi", font=FB)
+        wifi_box.pack(fill="x", padx=8, pady=(0, 8))
+
+        self.net_wifi_enabled = tk.BooleanVar(value=False)
+        self.chk_wifi_enabled = tk.Checkbutton(wifi_box, text="Enable WiFi", font=FA,
+                                                 variable=self.net_wifi_enabled)
+        self.chk_wifi_enabled.grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 0))
+
+        tk.Label(wifi_box, text="Network Name (SSID):", font=FA).grid(row=1, column=0, sticky="w", padx=(28, 8), pady=4)
+        self.net_wifi_ssid = tk.Entry(wifi_box, font=FA, width=28)
+        self.net_wifi_ssid.grid(row=1, column=1, sticky="w", padx=8)
+
+        tk.Label(wifi_box, text="Password:", font=FA).grid(row=2, column=0, sticky="w", padx=(28, 8), pady=4)
+        self.net_wifi_psk = tk.Entry(wifi_box, font=FA, width=28, show="*")
+        self.net_wifi_psk.grid(row=2, column=1, sticky="w", padx=8)
+        self.net_wifi_show = tk.BooleanVar(value=False)
+        tk.Checkbutton(wifi_box, text="Show", font=FS, variable=self.net_wifi_show,
+                        command=self._on_wifi_show_toggle).grid(row=2, column=2, sticky="w")
+
+        tk.Label(wifi_box, text="There's no way to scan for nearby networks -- Meshtastic's device protocol "
+                                 "doesn't expose that, so type the SSID exactly as it appears elsewhere.",
+                  font=FS, fg=DIM_FG, wraplength=860, justify="left").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 6))
+
         self.net_link_var = tk.StringVar(value="")
         tk.Label(f, textvariable=self.net_link_var, font=FS, fg=DIM_FG, anchor="w").pack(fill="x", padx=8)
 
@@ -1554,11 +1578,17 @@ class App(tk.Tk):
         state = "normal" if self._network_ready() else "disabled"
         self.btn_save_network.config(state=state)
         self.btn_discard_network.config(state=state)
+        self.chk_wifi_enabled.config(state=state)
+        self.net_wifi_ssid.config(state=state)
+        self.net_wifi_psk.config(state=state)
 
     def _on_net_mode_change(self):
         state = "normal" if self.net_mode.get() == "STATIC" else "disabled"
         for entry in self.net_entries.values():
             entry.config(state=state)
+
+    def _on_wifi_show_toggle(self):
+        self.net_wifi_psk.config(show="" if self.net_wifi_show.get() else "*")
 
     def _load_network_fields(self):
         self._update_network_gate()
@@ -1575,6 +1605,14 @@ class App(tk.Tk):
             entry.delete(0, "end")
             entry.insert(0, s[key])
         self._on_net_mode_change()
+
+        self.net_wifi_enabled.set(s["wifi_enabled"])
+        for entry, value in ((self.net_wifi_ssid, s["wifi_ssid"]), (self.net_wifi_psk, s["wifi_psk"])):
+            entry.config(state="normal")
+            entry.delete(0, "end")
+            entry.insert(0, value)
+        self._update_network_gate()
+
         self.net_link_var.set(
             f"Device: Ethernet {'enabled' if s['eth_enabled'] else 'DISABLED'}  |  "
             f"WiFi {'enabled' if s['wifi_enabled'] else 'disabled'}"
@@ -1593,15 +1631,20 @@ class App(tk.Tk):
         except ValueError as exc:
             messagebox.showwarning("Invalid Address", str(exc))
             return
+        wifi_enabled = self.net_wifi_enabled.get()
+        wifi_ssid = self.net_wifi_ssid.get().strip()
+        wifi_psk = self.net_wifi_psk.get()
         summary = ("DHCP (address assigned by a router/switch)" if mode == "DHCP"
                    else f"Static  {fields['ip'].strip()}  mask {fields['subnet'].strip()}")
+        summary += f"\n    WiFi: {'enabled, SSID ' + repr(wifi_ssid) if wifi_enabled else 'disabled'}"
         if not messagebox.askyesno(
                 "Confirm Save",
                 f"Write this network configuration to the device?\n\n    {summary}\n\n"
                 "The device will reboot to apply it, and the serial connection will drop."):
             return
         try:
-            self.client.save_network_settings(mode, **fields)
+            self.client.save_network_settings(mode, wifi_enabled=wifi_enabled, wifi_ssid=wifi_ssid,
+                                               wifi_psk=wifi_psk, **fields)
         except (ValueError, RuntimeError) as exc:
             messagebox.showerror("Network", str(exc))
             return

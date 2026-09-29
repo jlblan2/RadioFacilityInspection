@@ -606,6 +606,8 @@ class MeshClient:
             "dns": int_to_ipv4(n.ipv4_config.dns),
             "eth_enabled": n.eth_enabled,
             "wifi_enabled": n.wifi_enabled,
+            "wifi_ssid": n.wifi_ssid,
+            "wifi_psk": n.wifi_psk,
         }
 
     @staticmethod
@@ -646,18 +648,22 @@ class MeshClient:
         return values
 
     def save_network_settings(self, address_mode: str, ip: str = "", subnet: str = "",
-                               gateway: str = "", dns: str = ""):
+                               gateway: str = "", dns: str = "", wifi_enabled: bool = None,
+                               wifi_ssid: str = None, wifi_psk: str = None):
         """
-        Assign the device's IPv4 addressing (DHCP or a static address/mask).
-        Serial only: the change makes the device drop and re-acquire its
-        network address, which would sever a TCP session mid-write. Validation
-        errors raise immediately; the write itself runs on a background thread
-        and reports 'network_saved' or 'error'.
+        Assign the device's IPv4 addressing (DHCP or a static address/mask)
+        and, optionally, its WiFi client credentials. Serial only: the change
+        makes the device drop and re-acquire its network address, which would
+        sever a TCP session mid-write. wifi_* args are left untouched on the
+        device when passed as None (their default), so callers that only
+        care about IP addressing don't need to pass them. Validation errors
+        raise immediately; the write itself runs on a background thread and
+        reports 'network_saved' or 'error'.
         """
         if self.interface is None:
             raise RuntimeError("Not connected")
         if self.kind != "serial":
-            raise RuntimeError("Assigning an IP address requires a Serial (USB) connection.")
+            raise RuntimeError("Assigning network settings requires a Serial (USB) connection.")
 
         static = address_mode == "STATIC"
         values = self.validate_network_settings(address_mode, ip, subnet, gateway, dns)
@@ -673,6 +679,12 @@ class MeshClient:
                     n.ipv4_config.subnet = values["subnet"]
                     n.ipv4_config.gateway = values["gateway"]
                     n.ipv4_config.dns = values["dns"]
+                if wifi_enabled is not None:
+                    n.wifi_enabled = wifi_enabled
+                if wifi_ssid is not None:
+                    n.wifi_ssid = wifi_ssid
+                if wifi_psk is not None:
+                    n.wifi_psk = wifi_psk
                 node.writeConfig("network")
                 node.commitSettingsTransaction()
                 self.events.put(("network_saved", None))
