@@ -256,6 +256,108 @@ class ChannelDialog(tk.Toplevel):
         self.destroy()
 
 
+BROADCAST_LABEL = "Broadcast (all)"
+
+
+class RecipientsDialog(tk.Toplevel):
+    """Modal picker for one or more message recipients. Broadcast is exclusive:
+    it can't be combined with individual nodes."""
+
+    def __init__(self, parent, node_labels, selected, on_ok):
+        super().__init__(parent)
+        self.title("Select Recipients")
+        self.geometry("400x480")
+        self.transient(parent)
+        self.grab_set()
+
+        self.labels = list(node_labels)
+        self.chosen = {label for label in selected if label in self.labels}
+        self.on_ok = on_ok
+        self.visible = []
+
+        self.bcast_var = tk.BooleanVar(value=BROADCAST_LABEL in selected)
+        tk.Checkbutton(self, text="Broadcast to everyone (ignores the list below)", font=FA,
+                        variable=self.bcast_var, command=self._apply_bcast_state).pack(
+            anchor="w", padx=8, pady=(8, 0))
+
+        filt = tk.Frame(self)
+        filt.pack(fill="x", padx=8, pady=6)
+        tk.Label(filt, text="Filter:", font=FA).pack(side="left")
+        self.filter_var = tk.StringVar()
+        self.filter_var.trace_add("write", lambda *_: self._render())
+        self.filter_entry = tk.Entry(filt, font=FA, textvariable=self.filter_var)
+        self.filter_entry.pack(side="left", fill="x", expand=True, padx=6)
+
+        box = tk.Frame(self)
+        box.pack(fill="both", expand=True, padx=8)
+        sb = tk.Scrollbar(box)
+        self.listbox = tk.Listbox(box, selectmode="multiple", exportselection=False, font=FA,
+                                    yscrollcommand=sb.set)
+        sb.config(command=self.listbox.yview)
+        sb.pack(side="right", fill="y")
+        self.listbox.pack(side="left", fill="both", expand=True)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+
+        self.count_var = tk.StringVar()
+        tk.Label(self, textvariable=self.count_var, font=FS, fg=DIM_FG).pack(anchor="w", padx=8, pady=(4, 0))
+
+        btns = tk.Frame(self)
+        btns.pack(pady=10)
+        tk.Button(btns, text="Select All Shown", font=FA, command=self._select_all_shown).pack(side="left", padx=4)
+        tk.Button(btns, text="Clear", font=FA, command=self._clear).pack(side="left", padx=4)
+        tk.Button(btns, text="OK", font=FB, bg="#2E7D32", fg="white", padx=14,
+                   command=self._on_ok).pack(side="left", padx=(16, 4))
+        tk.Button(btns, text="Cancel", font=FA, padx=14, command=self.destroy).pack(side="left", padx=4)
+
+        self._render()
+
+    def _render(self):
+        needle = self.filter_var.get().strip().lower()
+        self.visible = [label for label in self.labels if needle in label.lower()]
+        self.listbox.config(state="normal")  # a disabled Listbox silently ignores insert/select
+        self.listbox.delete(0, "end")
+        for i, label in enumerate(self.visible):
+            self.listbox.insert("end", label)
+            if label in self.chosen:
+                self.listbox.selection_set(i)
+        self._apply_bcast_state()
+
+    def _apply_bcast_state(self):
+        bcast = self.bcast_var.get()
+        self.listbox.config(state="disabled" if bcast else "normal")
+        self.filter_entry.config(state="disabled" if bcast else "normal")
+        self._update_count()
+
+    def _update_count(self):
+        if self.bcast_var.get():
+            self.count_var.set("Broadcast: every node on the channel receives it.")
+        else:
+            self.count_var.set(f"{len(self.chosen)} selected  |  showing {len(self.visible)} of {len(self.labels)}")
+
+    def _on_select(self, _event=None):
+        picked = {self.visible[i] for i in self.listbox.curselection()}
+        self.chosen = (self.chosen - set(self.visible)) | picked
+        self._update_count()
+
+    def _select_all_shown(self):
+        self.bcast_var.set(False)
+        self.chosen |= set(self.visible)
+        self._render()
+
+    def _clear(self):
+        self.bcast_var.set(False)
+        self.chosen.clear()
+        self._render()
+
+    def _on_ok(self):
+        if self.bcast_var.get():
+            result = [BROADCAST_LABEL]
+        else:
+            result = [label for label in self.labels if label in self.chosen]  # may be empty
+        self.on_ok(result)
+        self.destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -265,7 +367,7 @@ class App(tk.Tk):
 
         self.client = MeshClient()
         self.connected_info = None
-        self.node_lookup: dict[str, str] = {}   # display name -> node id, for the destination combobox
+        self.node_lookup: dict[str, str] = {BROADCAST_LABEL: BROADCAST_ADDR}   # display name -> node id, for message recipients
 
         self.fw_queue: "queue.Queue" = queue.Queue()
         self.latest_release = None
@@ -578,10 +680,12 @@ class App(tk.Tk):
         top.pack(fill="x", padx=8, pady=8)
 
         tk.Label(top, text="To:", font=FA).pack(side="left")
-        self.msg_dest = ttk.Combobox(top, width=30, font=FA, state="readonly")
-        self.msg_dest["values"] = ["Broadcast (all)"]
-        self.msg_dest.current(0)
-        self.msg_dest.pack(side="left", padx=6)
+        self.msg_recipients = [BROADCAST_LABEL]
+        self.msg_to_var = tk.StringVar()
+        tk.Label(top, textvariable=self.msg_to_var, font=FA, width=38, anchor="w", relief="sunken",
+                  bg="white").pack(side="left", padx=6)
+        tk.Button(top, text="Select…", font=FA, command=self._pick_recipients).pack(side="left")
+        self._set_recipients(self.msg_recipients)
 
         tk.Label(top, text="Channel:", font=FA).pack(side="left", padx=(16, 0))
         self.msg_channel = ttk.Spinbox(top, from_=0, to=7, width=4, font=FA)
@@ -608,19 +712,60 @@ class App(tk.Tk):
         if not self.client.is_connected():
             messagebox.showwarning("Not Connected", "Connect to a device first.")
             return
-        dest_label = self.msg_dest.get()
-        dest_id = self.node_lookup.get(dest_label, BROADCAST_ADDR)
+        if not self.msg_recipients:
+            messagebox.showwarning("No Recipients", "Choose who to send to with Select…")
+            return
+        # No fallback to broadcast for an unknown label: a message meant for
+        # specific nodes must never silently go out to everyone.
+        unknown = [label for label in self.msg_recipients if label not in self.node_lookup]
+        if unknown:
+            messagebox.showwarning(
+                "Unknown Recipients",
+                "These recipients are no longer in the node list:\n\n    " + "\n    ".join(unknown) +
+                "\n\nPick recipients again with Select…")
+            return
+        dests = [(label, self.node_lookup[label]) for label in self.msg_recipients]
+        if len(dests) > 5 and not messagebox.askyesno(
+                "Confirm Send",
+                f"Send this as {len(dests)} separate direct messages? Each one is its own radio "
+                "transmission, so a long list uses a lot of airtime."):
+            return
         try:
             channel = int(self.msg_channel.get())
         except ValueError:
             channel = 0
-        try:
-            self.client.send_text(text, destination_id=dest_id, channel_index=channel)
-        except Exception as exc:
-            messagebox.showerror("Send Failed", str(exc))
+
+        sent, failed = [], []
+        for label, dest_id in dests:
+            try:
+                self.client.send_text(text, destination_id=dest_id, channel_index=channel)
+                sent.append(label)
+            except Exception as exc:
+                failed.append((label, str(exc)))
+        if sent:
+            self._append_msg(f"[{ts()}] → {', '.join(sent)} (ch {channel}): {text}\n", "out")
+        if failed:
+            # Keep the text and narrow the recipients to the failures, so a retry
+            # doesn't re-send to the nodes that already got it.
+            self._set_recipients([label for label, _ in failed])
+            messagebox.showerror(
+                "Send Failed",
+                f"{len(sent)} sent, {len(failed)} failed (recipients narrowed to the failures):\n\n" +
+                "\n".join(f"{label}: {err}" for label, err in failed))
             return
-        self._append_msg(f"[{ts()}] → {dest_label} (ch {channel}): {text}\n", "out")
         self.msg_entry.delete(0, "end")
+
+    def _set_recipients(self, labels):
+        self.msg_recipients = list(labels)
+        if len(labels) <= 1:
+            self.msg_to_var.set(labels[0] if labels else "")
+        else:
+            shown = ", ".join(labels[:3]) + (", …" if len(labels) > 3 else "")
+            self.msg_to_var.set(f"{len(labels)} nodes: {shown}")
+
+    def _pick_recipients(self):
+        node_labels = [label for label in self.node_lookup if label != BROADCAST_LABEL]
+        RecipientsDialog(self, node_labels, self.msg_recipients, self._set_recipients)
 
     def _append_msg(self, line: str, tag: str):
         self.msg_log.config(state="normal")
@@ -707,7 +852,7 @@ class App(tk.Tk):
 
         for row in self.node_tree.get_children():
             self.node_tree.delete(row)
-        self.node_lookup = {"Broadcast (all)": BROADCAST_ADDR}
+        self.node_lookup = {BROADCAST_LABEL: BROADCAST_ADDR}
 
         shown = 0
         for node_id, node in nodes.items():
@@ -722,7 +867,6 @@ class App(tk.Tk):
             self.node_count_var.set(f"{len(nodes)} node(s)")
         else:
             self.node_count_var.set(f"{shown} of {len(nodes)} node(s) on channel {self.node_channel.get()}")
-        self.msg_dest["values"] = list(self.node_lookup.keys())
 
     def _refresh_battery(self):
         status = self.client.get_battery_status()
@@ -862,7 +1006,7 @@ class App(tk.Tk):
         long_name = values[1]
         if long_name not in self.node_lookup:
             return
-        self.msg_dest.set(long_name)
+        self._set_recipients([long_name])
         channel_label = self.node_channel.get()
         channel_idx = self.node_channel_lookup.get(channel_label)
         if channel_idx is not None:
@@ -2056,7 +2200,6 @@ class App(tk.Tk):
             node_id = (payload.get("user") or {}).get("id") or str(payload.get("num"))
             self._upsert_node_row(node_id, payload)
             self.node_count_var.set(f"{len(self.node_tree.get_children())} node(s)")
-            self.msg_dest["values"] = list(self.node_lookup.keys())
 
         elif kind == "text":
             sender = self.node_lookup_reverse(payload["from_id"])
