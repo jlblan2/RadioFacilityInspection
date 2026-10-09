@@ -83,6 +83,179 @@ def encode_psk(mode: str, custom_b64: str = "") -> bytes:
             raise ValueError(f"Invalid base64 PSK: {exc}") from exc
     raise ValueError(f"Unknown PSK mode: {mode}")
 
+MODEM_PRESET_NAMES = list(config_pb2.Config.LoRaConfig.ModemPreset.keys())
+FEM_LNA_MODE_OPTIONS = list(config_pb2.Config.LoRaConfig.FEM_LNA_Mode.keys())
+
+# ── LoRa regional rules ──────────────────────────────────────────────────
+# The device never reports which presets/slots/power levels a region allows, so
+# these mirror the Meshtastic firmware (src/mesh/RadioInterface.cpp region table,
+# src/mesh/MeshRadio.h modemPresetToParams, RadioInterface::applyModemConfig).
+# region -> (freq_start MHz, freq_end MHz, tx power limit dBm, duty cycle %, wide LoRa 2.4 GHz)
+LORA_REGIONS = {
+    "UNSET": (902.0, 928.0, 30, 100, False),   # firmware treats UNSET like US
+    "US": (902.0, 928.0, 30, 100, False),
+    "EU_433": (433.0, 434.0, 10, 10, False),
+    "EU_868": (869.4, 869.65, 27, 10, False),
+    "CN": (470.0, 510.0, 19, 100, False),
+    "JP": (920.5, 923.5, 13, 100, False),
+    "ANZ": (915.0, 928.0, 30, 100, False),
+    "ANZ_433": (433.05, 434.79, 14, 100, False),
+    "RU": (868.7, 869.2, 20, 100, False),
+    "KR": (920.0, 923.0, 23, 100, False),
+    "TW": (920.0, 925.0, 27, 100, False),
+    "IN": (865.0, 867.0, 30, 100, False),
+    "NZ_865": (864.0, 868.0, 36, 100, False),
+    "TH": (920.0, 925.0, 27, 10, False),
+    "UA_433": (433.0, 434.7, 10, 10, False),
+    "UA_868": (868.0, 868.6, 14, 1, False),
+    "MY_433": (433.0, 435.0, 20, 100, False),
+    "MY_919": (919.0, 924.0, 27, 100, False),
+    "SG_923": (917.0, 925.0, 20, 100, False),
+    "PH_433": (433.0, 434.7, 10, 100, False),
+    "PH_868": (868.0, 869.4, 14, 100, False),
+    "PH_915": (915.0, 918.0, 24, 100, False),
+    "KZ_433": (433.075, 434.775, 10, 100, False),
+    "KZ_863": (863.0, 868.0, 30, 100, False),
+    "NP_865": (865.0, 868.0, 30, 100, False),
+    "BR_902": (902.0, 907.5, 30, 100, False),
+    "LORA_24": (2400.0, 2483.5, 10, 100, True),
+}
+
+# preset -> (bandwidth kHz, bandwidth kHz on 2.4 GHz "wide" LoRa, spread factor, coding rate).
+# Only presets the firmware actually implements: the others in the protobuf enum
+# (VERY_LONG_SLOW, LITE_*, NARROW_*) silently fall through to LONG_FAST's
+# parameters, so offering them would be misleading.
+LORA_PRESETS = {
+    "LONG_FAST": (250.0, 812.5, 11, 5),
+    "LONG_MODERATE": (125.0, 406.25, 11, 8),
+    "LONG_SLOW": (125.0, 406.25, 12, 8),
+    "LONG_TURBO": (500.0, 1625.0, 11, 8),
+    "MEDIUM_FAST": (250.0, 812.5, 9, 5),
+    "MEDIUM_SLOW": (250.0, 812.5, 10, 5),
+    "SHORT_FAST": (250.0, 812.5, 7, 5),
+    "SHORT_SLOW": (250.0, 812.5, 8, 5),
+    "SHORT_TURBO": (500.0, 1625.0, 7, 5),
+}
+
+LORA_BW_CODES = {False: [31, 62, 125, 250, 500], True: [200, 400, 800, 1600]}
+_LORA_BW_KHZ = {31: 31.25, 62: 62.5, 200: 203.125, 400: 406.25, 800: 812.5, 1600: 1625.0}
+LORA_SF_CHOICES = [7, 8, 9, 10, 11, 12]
+LORA_CR_CHOICES = [5, 6, 7, 8]   # 4/5 .. 4/8
+LORA_HOP_MAX = 7
+_FREQ_EPS = 1e-6
+
+
+def lora_region_limits(region: str):
+    """(start MHz, end MHz, power limit dBm, duty cycle %, wide) or None when the
+    firmware table the GUI mirrors has no entry for this region."""
+    return LORA_REGIONS.get(region)
+
+
+def lora_bw_khz(code: int) -> float:
+    return _LORA_BW_KHZ.get(code, float(code))
+
+
+def lora_bw_code(khz: float) -> int:
+    """Inverse of lora_bw_khz: the code the device stores for a bandwidth."""
+    for code, value in _LORA_BW_KHZ.items():
+        if abs(value - khz) < 0.01:
+            return code
+    return int(round(khz))
+
+
+def lora_preset_params(preset: str, region: str):
+    """(bandwidth kHz, spread factor, coding rate) a preset resolves to in a region."""
+    bw, bw_wide, sf, cr = LORA_PRESETS[preset]
+    limits = lora_region_limits(region)
+    return (bw_wide if limits and limits[4] else bw), sf, cr
+
+
+def lora_fits_region(region: str, bw_khz: float) -> bool:
+    """The firmware refuses (falls back to LONG_FAST) a bandwidth wider than the region's span."""
+    limits = lora_region_limits(region)
+    return limits is None or (limits[1] - limits[0]) + _FREQ_EPS >= bw_khz / 1000.0
+
+
+def lora_valid_presets(region: str) -> list:
+    return [p for p in LORA_PRESETS if lora_fits_region(region, lora_preset_params(p, region)[0])]
+
+
+def lora_valid_bw_codes(region: str) -> list:
+    limits = lora_region_limits(region)
+    wide = bool(limits and limits[4])
+    return [c for c in LORA_BW_CODES[wide] if lora_fits_region(region, lora_bw_khz(c))]
+
+
+def lora_slot_count(region: str, bw_khz: float) -> int:
+    """Frequency slots (channel_num 1..N) that fit the region at a bandwidth; 0 if unknown."""
+    limits = lora_region_limits(region)
+    if limits is None:
+        return 0
+    return int(((limits[1] - limits[0]) + _FREQ_EPS) // (bw_khz / 1000.0))
+
+
+def lora_slot_freq_mhz(region: str, bw_khz: float, slot: int) -> float:
+    limits = lora_region_limits(region)
+    return limits[0] + bw_khz / 2000.0 + (slot - 1) * (bw_khz / 1000.0)
+
+
+def lora_max_power(region: str) -> int:
+    limits = lora_region_limits(region)
+    return limits[2] if limits else 30
+
+
+def lora_effective_bw_khz(settings: dict) -> float:
+    if settings["use_preset"]:
+        return lora_preset_params(settings["modem_preset"], settings["region"])[0]
+    return lora_bw_khz(int(settings["bandwidth"]))
+
+
+def validate_lora_settings(s: dict) -> list:
+    """Problems with a requested LoRa config (empty list == OK). The GUI only
+    offers valid choices, so this is the backstop for stale selections."""
+    problems = []
+    region = s["region"]
+    limits = lora_region_limits(region)
+    if s["use_preset"]:
+        if s["modem_preset"] not in LORA_PRESETS:
+            problems.append(f"Modem preset {s['modem_preset']} isn't implemented by the firmware.")
+        elif s["modem_preset"] not in lora_valid_presets(region):
+            problems.append(f"Preset {s['modem_preset']} is wider than the {region} band — "
+                            "the device would fall back to LONG_FAST.")
+    else:
+        if int(s["bandwidth"]) not in lora_valid_bw_codes(region):
+            problems.append(f"Bandwidth {s['bandwidth']} kHz doesn't fit the {region} band.")
+        if int(s["spread_factor"]) not in LORA_SF_CHOICES:
+            problems.append("Spread factor must be 7-12.")
+        if int(s["coding_rate"]) not in LORA_CR_CHOICES:
+            problems.append("Coding rate must be 4/5 to 4/8.")
+    bw = None
+    try:
+        bw = lora_effective_bw_khz(s)
+    except (KeyError, ValueError):
+        pass
+    try:
+        override = float(s["override_frequency"])
+    except (TypeError, ValueError):
+        override = 0.0  # reported below
+    if bw and limits and not override:
+        slots = lora_slot_count(region, bw)
+        if not 0 <= int(s["channel_num"]) <= slots:
+            problems.append(f"Frequency slot {s['channel_num']} is outside 0-{slots} for {region} at {bw:g} kHz.")
+    if limits and not 0 <= int(s["tx_power"]) <= limits[2]:
+        problems.append(f"TX power {s['tx_power']} dBm is outside 0-{limits[2]} for {region}.")
+    if not 0 <= int(s["hop_limit"]) <= LORA_HOP_MAX:
+        problems.append(f"Hop limit must be 0-{LORA_HOP_MAX}.")
+    for key, label in (("override_frequency", "Override frequency"), ("frequency_offset", "Frequency offset")):
+        try:
+            float(s[key])
+        except (TypeError, ValueError):
+            problems.append(f"{label} must be a number.")
+    if not problems and float(s["override_frequency"]) < 0:
+        problems.append("Override frequency can't be negative.")
+    return problems
+
+
 ADDRESS_MODES = list(config_pb2.Config.NetworkConfig.AddressMode.keys())  # DHCP, STATIC
 
 
@@ -590,6 +763,61 @@ class MeshClient:
                 self.events.put(("error", f"Save MQTT settings failed: {exc}"))
 
         threading.Thread(target=worker, daemon=True, name="mesh-save-mqtt").start()
+
+    # ── LoRa radio settings ──────────────────────────────────────────────
+    _LORA_BOOLS = ("use_preset", "tx_enabled", "override_duty_cycle", "sx126x_rx_boosted_gain",
+                   "pa_fan_disabled", "ignore_mqtt", "config_ok_to_mqtt")
+    _LORA_INTS = ("bandwidth", "spread_factor", "coding_rate", "hop_limit", "tx_power", "channel_num")
+    _LORA_FLOATS = ("frequency_offset", "override_frequency")
+
+    def get_lora_settings(self) -> dict:
+        """The device's current LoRa config, read from the already-synced local
+        config (populated during connect). ignore_incoming (a node list) and
+        serial_hal_only are not exposed."""
+        if self.interface is None:
+            raise RuntimeError("Not connected")
+        lora = self.interface.localNode.localConfig.lora
+        enums = config_pb2.Config.LoRaConfig
+        s = {key: getattr(lora, key) for key in self._LORA_BOOLS + self._LORA_INTS + self._LORA_FLOATS}
+        s["region"] = enums.RegionCode.Name(lora.region)
+        s["modem_preset"] = enums.ModemPreset.Name(lora.modem_preset)
+        s["fem_lna_mode"] = enums.FEM_LNA_Mode.Name(lora.fem_lna_mode)
+        return s
+
+    def save_lora_settings(self, settings: dict):
+        """
+        Push the LoRa config to the device. Validation errors raise immediately;
+        the write runs on a background thread and reports 'lora_saved' or
+        'error'. Changing region/preset/slot makes the device reboot.
+        """
+        if self.interface is None:
+            raise RuntimeError("Not connected")
+        problems = validate_lora_settings(settings)
+        if problems:
+            raise ValueError("\n".join(problems))
+        node = self.interface.localNode
+        enums = config_pb2.Config.LoRaConfig
+
+        def worker():
+            try:
+                node.beginSettingsTransaction()
+                lora = node.localConfig.lora
+                for key in self._LORA_BOOLS:
+                    setattr(lora, key, bool(settings[key]))
+                for key in self._LORA_INTS:
+                    setattr(lora, key, int(settings[key]))
+                for key in self._LORA_FLOATS:
+                    setattr(lora, key, float(settings[key]))
+                lora.region = enums.RegionCode.Value(settings["region"])
+                lora.modem_preset = enums.ModemPreset.Value(settings["modem_preset"])
+                lora.fem_lna_mode = enums.FEM_LNA_Mode.Value(settings["fem_lna_mode"])
+                node.writeConfig("lora")
+                node.commitSettingsTransaction()
+                self.events.put(("lora_saved", None))
+            except Exception as exc:
+                self.events.put(("error", f"Save LoRa settings failed: {exc}"))
+
+        threading.Thread(target=worker, daemon=True, name="mesh-save-lora").start()
 
     # ── network (IPv4 address) settings ─────────────────────────────────
     def get_network_settings(self) -> dict:

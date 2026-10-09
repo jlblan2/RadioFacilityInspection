@@ -29,6 +29,9 @@ from mesh_client import (
     MeshClient, list_serial_ports, scan_ble, node_display_name, strip_ansi,
     BROADCAST_ADDR, ROLE_OPTIONS, REGION_OPTIONS,
     PSK_MODES, describe_psk, encode_psk,
+    LORA_REGIONS, FEM_LNA_MODE_OPTIONS, LORA_SF_CHOICES, LORA_CR_CHOICES, LORA_HOP_MAX,
+    lora_region_limits, lora_valid_presets, lora_valid_bw_codes, lora_preset_params, lora_bw_khz, lora_bw_code,
+    lora_slot_count, lora_slot_freq_mhz, lora_max_power, lora_effective_bw_khz, validate_lora_settings,
 )
 import firmware as fw
 import netdiscovery
@@ -410,6 +413,7 @@ class App(tk.Tk):
         self.tab_settings = ttk.Frame(nb)
         self.tab_firmware = ttk.Frame(nb)
         self.tab_mqtt = ttk.Frame(nb)
+        self.tab_lora = ttk.Frame(nb)
         self.tab_network = ttk.Frame(nb)
         self.tab_report = ttk.Frame(nb)
         self.tab_log = ttk.Frame(nb)
@@ -419,6 +423,7 @@ class App(tk.Tk):
         nb.add(self.tab_settings, text="Settings")
         nb.add(self.tab_firmware, text="Firmware")
         nb.add(self.tab_mqtt, text="MQTT")
+        nb.add(self.tab_lora, text="LoRa")
         nb.add(self.tab_network, text="Network")
         nb.add(self.tab_report, text="Report")
         nb.add(self.tab_log, text="Log")
@@ -429,6 +434,7 @@ class App(tk.Tk):
         self._build_settings_tab()
         self._build_firmware_tab()
         self._build_mqtt_tab()
+        self._build_lora_tab()
         self._build_network_tab()
         self._build_report_tab()
         self._build_log_tab()
@@ -1633,6 +1639,342 @@ class App(tk.Tk):
         self.status_var.set("Saving MQTT settings…")
         self.client.save_mqtt_settings(settings)
 
+    # ── LoRa tab ─────────────────────────────────────────────────────────
+    LORA_DEFAULTS = {
+        "region": "US", "use_preset": True, "modem_preset": "LONG_FAST", "bandwidth": 250,
+        "spread_factor": 11, "coding_rate": 5, "channel_num": 0, "tx_enabled": True, "tx_power": 0,
+        "hop_limit": 3, "override_duty_cycle": False, "sx126x_rx_boosted_gain": False,
+        "pa_fan_disabled": False, "ignore_mqtt": False, "config_ok_to_mqtt": False,
+        "fem_lna_mode": FEM_LNA_MODE_OPTIONS[0], "override_frequency": 0.0, "frequency_offset": 0.0,
+    }
+
+    def _build_lora_tab(self):
+        f = self.tab_lora
+        tk.Label(f, text="Every dropdown below only offers choices the selected Region allows (band limits "
+                         "from the Meshtastic firmware). Changing the region re-checks the others.",
+                  font=FS, fg=DIM_FG, anchor="w", wraplength=920, justify="left").pack(fill="x", padx=8, pady=(8, 0))
+
+        cols = tk.Frame(f)
+        cols.pack(fill="both", expand=True, padx=8, pady=4)
+        left = tk.Frame(cols)
+        left.pack(side="left", fill="both", expand=True, anchor="n")
+        right = tk.Frame(cols)
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0), anchor="n")
+
+        def combo(parent, row, label, width, values=(), handler=None):
+            tk.Label(parent, text=label, font=FA).grid(row=row, column=0, sticky="w", padx=8, pady=3)
+            cb = ttk.Combobox(parent, font=FA, width=width, state="readonly", values=list(values))
+            cb.grid(row=row, column=1, sticky="w", padx=8)
+            if handler:
+                cb.bind("<<ComboboxSelected>>", handler)
+            return cb
+
+        reg = tk.LabelFrame(left, text="Region", font=FB)
+        reg.pack(fill="x", pady=(0, 6))
+        self.lora_region = combo(reg, 0, "Region:", 14, LORA_REGIONS, self._on_lora_region_change)
+        self.lora_region_info = tk.Label(reg, text="", font=FS, fg=DIM_FG, justify="left", wraplength=420, anchor="w")
+        self.lora_region_info.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+
+        mod = tk.LabelFrame(left, text="Modulation", font=FB)
+        mod.pack(fill="x", pady=(0, 6))
+        self.lora_use_preset = tk.BooleanVar(value=True)
+        tk.Checkbutton(mod, text="Use modem preset", font=FA, variable=self.lora_use_preset,
+                        command=self._on_lora_mode_change).grid(row=0, column=0, columnspan=2, sticky="w", padx=8)
+        self.lora_preset = combo(mod, 1, "Modem preset:", 16, (), self._on_lora_modem_change)
+        self.lora_modem_info = tk.Label(mod, text="", font=FS, fg=DIM_FG, anchor="w")
+        self.lora_modem_info.grid(row=2, column=0, columnspan=2, sticky="w", padx=8)
+        self.lora_bw = combo(mod, 3, "Bandwidth (kHz):", 8, (), self._on_lora_modem_change)
+        self.lora_sf = combo(mod, 4, "Spread factor:", 8, [str(v) for v in LORA_SF_CHOICES], self._on_lora_modem_change)
+        self.lora_cr = combo(mod, 5, "Coding rate:", 8, [f"4/{v}" for v in LORA_CR_CHOICES], self._on_lora_modem_change)
+
+        rad = tk.LabelFrame(left, text="Radio", font=FB)
+        rad.pack(fill="x", pady=(0, 6))
+        self.lora_slot = combo(rad, 0, "Frequency slot:", 30, (), self._on_lora_modem_change)
+        self.lora_tx_enabled = tk.BooleanVar(value=True)
+        tk.Checkbutton(rad, text="Transmit enabled", font=FA, variable=self.lora_tx_enabled).grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=8)
+        self.lora_power = combo(rad, 2, "TX power (dBm):", 22)
+        self.lora_hop = combo(rad, 3, "Hop limit:", 6, [str(v) for v in range(LORA_HOP_MAX + 1)])
+
+        adv = tk.LabelFrame(right, text="Advanced", font=FB)
+        adv.pack(fill="x")
+        self.lora_flags = {}
+        for row, (key, text) in enumerate([
+                ("override_duty_cycle", "Override duty-cycle limit"),
+                ("sx126x_rx_boosted_gain", "SX126x RX boosted gain"),
+                ("pa_fan_disabled", "PA fan disabled"),
+                ("ignore_mqtt", "Ignore MQTT messages"),
+                ("config_ok_to_mqtt", "OK to share config via MQTT")]):
+            var = tk.BooleanVar(value=False)
+            tk.Checkbutton(adv, text=text, font=FA, variable=var).grid(
+                row=row, column=0, columnspan=2, sticky="w", padx=8)
+            self.lora_flags[key] = var
+        self.lora_fem = combo(adv, 5, "FEM LNA mode:", 16, FEM_LNA_MODE_OPTIONS)
+        tk.Label(adv, text="Override frequency (MHz):", font=FA).grid(row=6, column=0, sticky="w", padx=8, pady=3)
+        self.lora_override_freq = tk.Entry(adv, font=FA, width=12)
+        self.lora_override_freq.grid(row=6, column=1, sticky="w", padx=8)
+        tk.Label(adv, text="Frequency offset (MHz):", font=FA).grid(row=7, column=0, sticky="w", padx=8, pady=3)
+        self.lora_freq_offset = tk.Entry(adv, font=FA, width=12)
+        self.lora_freq_offset.grid(row=7, column=1, sticky="w", padx=8)
+        tk.Label(adv, text="Override frequency 0 = use the region's slot. A non-zero value bypasses the "
+                           "region's band plan, so only use it where your licence covers that frequency.",
+                  font=FS, fg=DIM_FG, wraplength=380, justify="left", anchor="w").grid(
+            row=8, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
+
+        self.lora_adjust_var = tk.StringVar(value="")
+        tk.Label(f, textvariable=self.lora_adjust_var, font=FS, fg="#B26A00", anchor="w",
+                  wraplength=920, justify="left").pack(fill="x", padx=8)
+
+        btns = tk.Frame(f)
+        btns.pack(fill="x", padx=8, pady=(4, 8))
+        self.btn_save_lora = tk.Button(btns, text="Save", font=FB, bg="#2E7D32", fg="white", padx=14,
+                                         command=self._save_lora_settings, state="disabled")
+        self.btn_save_lora.pack(side="left")
+        self.btn_cancel_lora = tk.Button(btns, text="Cancel", font=FB, padx=14,
+                                           command=self._cancel_lora, state="disabled")
+        self.btn_cancel_lora.pack(side="left", padx=8)
+
+        self._lora_loaded = None   # the device's settings as last read; None until connected
+        self._lora_apply(dict(self.LORA_DEFAULTS))
+
+    @staticmethod
+    def _leading_int(text: str, default: int) -> int:
+        try:
+            return int(str(text).split()[0])
+        except (ValueError, IndexError):
+            return default
+
+    def _lora_bw_now(self) -> float:
+        """Bandwidth (kHz) the current selections resolve to."""
+        region = self.lora_region.get()
+        if self.lora_use_preset.get() and self.lora_preset.get():
+            return lora_preset_params(self.lora_preset.get(), region)[0]
+        return lora_bw_khz(self._leading_int(self.lora_bw.get(), 250))
+
+    def _lora_apply(self, s: dict) -> list:
+        """Fill every control from a settings dict, then re-filter the region-
+        dependent dropdowns. Returns notes for values that had to be replaced."""
+        regions = list(LORA_REGIONS)
+        if s["region"] not in regions:
+            regions.append(s["region"])  # a region this GUI has no band data for stays selectable
+        self.lora_region["values"] = regions
+        self.lora_region.set(s["region"])
+        self.lora_use_preset.set(s["use_preset"])
+        self.lora_preset.set(s["modem_preset"])
+        self.lora_bw.set(str(s["bandwidth"]))
+        self.lora_sf.set(str(s["spread_factor"]))
+        self.lora_cr.set(f"4/{s['coding_rate']}")
+        self.lora_slot.set(str(s["channel_num"]))
+        self.lora_power.set(str(s["tx_power"]))
+        self.lora_hop.set(str(s["hop_limit"]))
+        self.lora_tx_enabled.set(s["tx_enabled"])
+        for key, var in self.lora_flags.items():
+            var.set(s[key])
+        self.lora_fem.set(s["fem_lna_mode"])
+        for entry, key in ((self.lora_override_freq, "override_frequency"), (self.lora_freq_offset, "frequency_offset")):
+            entry.delete(0, "end")
+            entry.insert(0, f"{float(s[key]):.6f}".rstrip("0").rstrip(".") or "0")
+        notes = self._lora_fill_dependent()
+        self._set_lora_widget_states()
+        return notes
+
+    def _lora_fill_dependent(self) -> list:
+        """Rebuild the dropdowns whose valid choices depend on the region (and
+        bandwidth), keeping each current selection where it's still valid."""
+        region = self.lora_region.get()
+        notes = []
+
+        presets = lora_valid_presets(region)
+        self.lora_preset["values"] = presets
+        if self.lora_preset.get() not in presets:
+            new = "LONG_FAST" if "LONG_FAST" in presets else presets[0]
+            if self.lora_use_preset.get():
+                notes.append(f"preset {self.lora_preset.get() or '(none)'} -> {new}")
+            self.lora_preset.set(new)
+
+        codes = [str(c) for c in lora_valid_bw_codes(region)]
+        self.lora_bw["values"] = codes
+        if self.lora_use_preset.get():
+            bw_khz, sf, cr = lora_preset_params(self.lora_preset.get(), region)
+            self.lora_bw.set(str(lora_bw_code(bw_khz)))  # shown (greyed out) for reference
+            self.lora_sf.set(str(sf))
+            self.lora_cr.set(f"4/{cr}")
+        else:
+            if self.lora_bw.get() not in codes:
+                notes.append(f"bandwidth {self.lora_bw.get()} -> {codes[-1]} kHz")
+                self.lora_bw.set(codes[-1])
+            if self._leading_int(self.lora_sf.get(), 0) not in LORA_SF_CHOICES:
+                notes.append(f"spread factor {self.lora_sf.get()} -> 11")
+                self.lora_sf.set("11")
+            if self.lora_cr.get() not in self.lora_cr["values"]:
+                notes.append(f"coding rate {self.lora_cr.get()} -> 4/5")
+                self.lora_cr.set("4/5")
+
+        bw = self._lora_bw_now()
+        n = lora_slot_count(region, bw)
+        slots = ["0 — auto (from the channel name)"] + [
+            f"{i} — {lora_slot_freq_mhz(region, bw, i):.3f} MHz" for i in range(1, n + 1)]
+        cur = self._leading_int(self.lora_slot.get(), 0)
+        if cur > n:
+            notes.append(f"frequency slot {cur} -> 0 (auto)")
+            cur = 0
+        self.lora_slot["values"] = slots
+        self.lora_slot.set(slots[cur])
+
+        limit = lora_max_power(region)
+        powers = [f"0 — region default ({limit} dBm)"] + [str(i) for i in range(1, limit + 1)]
+        cur = self._leading_int(self.lora_power.get(), 0)
+        if cur > limit:
+            notes.append(f"TX power {cur} -> 0 (region default, max {limit} dBm)")
+            cur = 0
+        self.lora_power["values"] = powers
+        self.lora_power.set(powers[cur])
+
+        hop = self._leading_int(self.lora_hop.get(), 3)
+        if not 0 <= hop <= LORA_HOP_MAX:
+            notes.append(f"hop limit {hop} -> {LORA_HOP_MAX}")
+            hop = LORA_HOP_MAX
+        self.lora_hop.set(str(hop))
+
+        self._update_lora_info()
+        return notes
+
+    def _update_lora_info(self):
+        region = self.lora_region.get()
+        limits = lora_region_limits(region)
+        if limits:
+            self.lora_region_info.config(
+                text=f"{limits[0]:g}–{limits[1]:g} MHz   |   max {limits[2]} dBm   |   duty cycle {limits[3]}%"
+                     + ("   |   2.4 GHz band" if limits[4] else ""))
+        else:
+            self.lora_region_info.config(
+                text="No band data for this region in the GUI's table, so the choices below aren't narrowed for it.")
+        bw = self._lora_bw_now()
+        sf = self._leading_int(self.lora_sf.get(), 11)
+        cr = self._leading_int(self.lora_cr.get().split("/")[-1], 5)
+        n = lora_slot_count(region, bw)
+        self.lora_modem_info.config(
+            text=f"{bw:g} kHz, SF{sf}, CR 4/{cr}" + (f"   |   {n} frequency slot(s) fit this band" if limits else ""))
+
+    def _set_lora_widget_states(self):
+        preset_mode = self.lora_use_preset.get()
+        self.lora_preset.config(state="readonly" if preset_mode else "disabled")
+        for cb in (self.lora_bw, self.lora_sf, self.lora_cr):
+            cb.config(state="disabled" if preset_mode else "readonly")
+
+    def _lora_show_notes(self, notes: list, prefix: str):
+        self.lora_adjust_var.set(f"{prefix}: " + "; ".join(notes) if notes else "")
+
+    def _on_lora_region_change(self, _event=None):
+        notes = self._lora_fill_dependent()
+        self._lora_show_notes(notes, f"Adjusted for {self.lora_region.get()}")
+
+    def _on_lora_modem_change(self, _event=None):
+        notes = self._lora_fill_dependent()
+        self._lora_show_notes(notes, "Adjusted")
+
+    def _on_lora_mode_change(self):
+        if not self.lora_use_preset.get():
+            # switching to manual: start from what the preset resolved to, so nothing changes on air
+            bw_khz, sf, cr = lora_preset_params(self.lora_preset.get(), self.lora_region.get())
+            self.lora_bw.set(str(lora_bw_code(bw_khz)))
+            self.lora_sf.set(str(sf))
+            self.lora_cr.set(f"4/{cr}")
+        self._set_lora_widget_states()
+        self._on_lora_modem_change()
+
+    def _lora_state(self) -> dict:
+        """The form as a settings dict (what the device is asked to hold)."""
+        region = self.lora_region.get()
+        use_preset = self.lora_use_preset.get()
+        preset = self.lora_preset.get() or "LONG_FAST"
+        if use_preset:
+            # The firmware recomputes bandwidth/SF from the preset at boot. A stored coding rate
+            # that differs from the preset's is a custom override the preset view can't show, so
+            # write back what the device already had rather than change it unseen (0 = no
+            # override, used when coming from manual mode).
+            bw_khz, sf, _ = lora_preset_params(preset, region)
+            bandwidth = lora_bw_code(bw_khz)
+            loaded = self._lora_loaded
+            cr = loaded["coding_rate"] if loaded and loaded["use_preset"] else 0
+        else:
+            bandwidth = self._leading_int(self.lora_bw.get(), 250)
+            sf = self._leading_int(self.lora_sf.get(), 11)
+            cr = self._leading_int(self.lora_cr.get().split("/")[-1], 5)
+        s = {
+            "region": region, "use_preset": use_preset, "modem_preset": preset,
+            "bandwidth": bandwidth, "spread_factor": sf, "coding_rate": cr,
+            "channel_num": self._leading_int(self.lora_slot.get(), 0),
+            "tx_enabled": self.lora_tx_enabled.get(),
+            "tx_power": self._leading_int(self.lora_power.get(), 0),
+            "hop_limit": self._leading_int(self.lora_hop.get(), 3),
+            "fem_lna_mode": self.lora_fem.get() or FEM_LNA_MODE_OPTIONS[0],
+            "override_frequency": self.lora_override_freq.get().strip() or "0",
+            "frequency_offset": self.lora_freq_offset.get().strip() or "0",
+        }
+        s.update({key: var.get() for key, var in self.lora_flags.items()})
+        return s
+
+    def _load_lora_fields(self):
+        if not self.client.is_connected():
+            return
+        try:
+            s = self.client.get_lora_settings()
+        except Exception as exc:
+            messagebox.showerror("LoRa", f"Could not read LoRa settings: {exc}")
+            return
+        self._lora_loaded = dict(s)
+        notes = self._lora_apply(s)
+        self._lora_show_notes(notes, "Not valid for this region on the device, shown corrected (Save to apply)")
+        self.btn_save_lora.config(state="normal")
+        self.btn_cancel_lora.config(state="normal")
+
+    def _cancel_lora(self):
+        self._load_lora_fields()
+        self.status_var.set("LoRa changes discarded")
+
+    def _save_lora_settings(self):
+        if not self.client.is_connected():
+            return
+        s = self._lora_state()
+        problems = validate_lora_settings(s)
+        if problems:
+            messagebox.showwarning("Invalid LoRa Settings", "\n".join(problems))
+            return
+        try:
+            current = self.client.get_lora_settings()
+        except Exception as exc:
+            messagebox.showerror("LoRa", f"Could not read the device's current settings: {exc}")
+            return
+
+        def differs(key):
+            a, b = current[key], s[key]
+            if key in ("frequency_offset", "override_frequency"):
+                return abs(float(a) - float(b)) > 1e-6
+            if s["use_preset"] and key in ("bandwidth", "spread_factor"):
+                return False  # the firmware recomputes these from the preset at boot
+            return a != b
+        changes = [f"    {key}:  {current[key]}  ->  {s[key]}" for key in s if differs(key)]
+        if not changes:
+            messagebox.showinfo("LoRa", "Nothing to save — these match the device's current settings.")
+            return
+        warning = ("The radio will reboot to apply LoRa changes. Nodes on a different region, preset or "
+                   "frequency slot will not hear this radio until they match.")
+        if float(s["override_frequency"]):
+            warning += ("\n\nOverride frequency bypasses the region's band plan — only use it on a frequency "
+                        "your licence permits.")
+        if not messagebox.askyesno("Confirm Save",
+                                    "Write these LoRa changes to the device?\n\n" + "\n".join(changes) +
+                                    "\n\n" + warning):
+            return
+        try:
+            self.client.save_lora_settings(s)
+        except (ValueError, RuntimeError) as exc:
+            messagebox.showerror("LoRa", str(exc))
+            return
+        self.btn_save_lora.config(state="disabled")
+        self.status_var.set("Saving LoRa settings…")
+
     # ── Network tab ──────────────────────────────────────────────────────
     NET_FIELDS = [("ip", "IP Address:"), ("subnet", "Subnet Mask:"),
                   ("gateway", "Gateway (optional):"), ("dns", "DNS (optional):")]
@@ -2106,6 +2448,7 @@ class App(tk.Tk):
             self.after(500, self._load_settings_fields)
             self.after(500, self._refresh_battery)
             self.after(500, self._load_mqtt_fields)
+            self.after(500, self._load_lora_fields)
             self.after(500, self._load_network_fields)
             self.after(500, self._refresh_channels)
             self.fw_current_var.set(
@@ -2139,6 +2482,8 @@ class App(tk.Tk):
             self.btn_discard_settings.config(state="disabled")
             self.btn_save_mqtt.config(state="disabled")
             self.btn_discard_mqtt.config(state="disabled")
+            self.btn_save_lora.config(state="disabled")
+            self.btn_cancel_lora.config(state="disabled")
             self.net_link_var.set("")
             self._update_network_gate()
             self._channels_cache = {}
@@ -2157,6 +2502,7 @@ class App(tk.Tk):
             self.btn_connect.config(state="normal")
             self.btn_save_settings.config(state="normal" if self.client.is_connected() else "disabled")
             self.btn_save_mqtt.config(state="normal" if self.client.is_connected() else "disabled")
+            self.btn_save_lora.config(state="normal" if self.client.is_connected() else "disabled")
             self._update_network_gate()
             messagebox.showerror("Meshtastic Error", str(payload))
 
@@ -2164,7 +2510,19 @@ class App(tk.Tk):
             self.status_var.set("Settings saved")
             self.btn_save_settings.config(state="normal")
             self._append_log("Device settings saved")
+            self._load_lora_fields()  # the Settings tab can change the region too
             messagebox.showinfo("Settings", "Settings saved to device.")
+
+        elif kind == "lora_saved":
+            self.status_var.set("LoRa settings saved — the device is rebooting")
+            self._append_log("LoRa settings saved")
+            self.btn_save_lora.config(state="normal")
+            self._load_settings_fields()  # keep the Settings tab's region in step
+            messagebox.showinfo(
+                "LoRa",
+                "LoRa settings saved to the device. It may reboot to apply them — reconnect if the "
+                "connection drops."
+            )
 
         elif kind == "mqtt_saved":
             self.status_var.set("MQTT settings saved")
