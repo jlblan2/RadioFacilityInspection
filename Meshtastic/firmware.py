@@ -16,15 +16,19 @@ family uses:
 """
 
 import ctypes
+import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import string
 import subprocess
 import sys
+import threading
 import urllib.request
 import zipfile
+from datetime import datetime
 
 try:
     # Use the OS certificate store (Windows/macOS/Linux) instead of the
@@ -303,14 +307,160 @@ def esptool_erase_flash(port: str) -> str:
     return _run_esptool(["--port", port, "erase_flash"])
 
 
-def esptool_write_flash(port: str, firmware_path: str, offset: str = ESP32_FLASH_OFFSET) -> str:
-    return _run_esptool(["--port", port, "write_flash", offset, firmware_path])
+def esptool_write_flash(port: str, firmware_path: str, offset: str = ESP32_FLASH_OFFSET, on_progress=None) -> str:
+    return _run_esptool(["--port", port, "write_flash", offset, firmware_path], on_progress=on_progress)
 
 
-def _run_esptool(args) -> str:
+_PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")   # esptool 5 prints e.g. "27.0%"; older ones "(37 %)"
+
+
+def _run_esptool(args, timeout: int = 300, on_progress=None) -> str:
+    """
+    Run esptool, returning its combined output (FirmwareError on failure or
+    timeout). esptool reports progress as "... (37 %)" rewritten in place with
+    carriage returns, so the output is read as a stream and on_progress(pct)
+    is called as the percentage advances -- a full-flash dump takes minutes.
+    """
     cmd = [sys.executable, "-m", "esptool"] + args
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    output = proc.stdout + "\n" + proc.stderr
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+    timed_out = threading.Event()
+
+    def kill():
+        timed_out.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, kill)
+    timer.start()
+    chunks, last_pct = [], -1
+    try:
+        while True:
+            data = proc.stdout.read(256)
+            if not data:
+                break
+            text = data.decode("utf-8", errors="replace")
+            chunks.append(text)
+            if on_progress:
+                found = _PERCENT_RE.findall(text)
+                if found:
+                    pct = min(int(float(found[-1])), 100)
+                    if pct != last_pct:
+                        last_pct = pct
+                        on_progress(pct)
+        proc.wait()
+    finally:
+        timer.cancel()
+    output = "".join(chunks)
+    if timed_out.is_set():
+        raise FirmwareError(f"esptool timed out after {timeout // 60} minutes.\n{output}")
     if proc.returncode != 0:
         raise FirmwareError(output)
     return output
+
+
+def _esptool_cmd(name: str) -> str:
+    """esptool 5 renamed read_flash -> read-flash (the old spelling still works but is
+    deprecated); esptool 4 only knows the underscore form."""
+    try:
+        import esptool
+        major = int(str(esptool.__version__).split(".")[0])
+    except (ImportError, AttributeError, ValueError):
+        major = 4
+    return name.replace("_", "-") if major >= 5 else name
+
+
+# ── full-flash backup / restore (ESP32 family) ──────────────────────────────
+# The radio has no command to read its own firmware back, so a backup is a dump
+# of the chip's whole flash (bootloader, partitions, app and the settings
+# filesystem). It restores by writing that image back at offset 0.
+
+_FLASH_SIZE_RE = re.compile(r"Detected flash size:\s*(\d+)\s*([KM])B", re.I)
+_CHIP_RE = re.compile(r"Chip (?:is|type:)\s*(ESP[\w-]+)")
+BACKUP_TIMEOUT_SECS = 45 * 60
+
+
+def esptool_flash_info(port: str) -> dict:
+    """{'chip': 'ESP32-S3', 'flash_bytes': 16777216} for the chip on `port`."""
+    out = _run_esptool(["--port", port, _esptool_cmd("flash_id")], timeout=120)
+    size = _FLASH_SIZE_RE.search(out)
+    chip = _CHIP_RE.search(out)
+    if not size or not chip:
+        raise FirmwareError(f"Couldn't read the chip type and flash size from esptool:\n{out}")
+    amount = int(size.group(1)) * (1024 if size.group(2).upper() == "K" else 1024 * 1024)
+    return {"chip": chip.group(1), "flash_bytes": amount}
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def esptool_backup_flash(port: str, dest_dir: str, on_progress=None) -> dict:
+    """
+    Dump the whole flash to dest_dir/<name>.bin plus a <name>.bin.json info file
+    (chip, size, SHA-256) that lets a later restore check the file. Returns the
+    info dict including 'path'. Raises FirmwareError if the dump isn't complete.
+    """
+    info = esptool_flash_info(port)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f"meshtastic_flash_backup_{info['chip']}_{info['flash_bytes'] >> 20}MB_{stamp}.bin"
+    path = os.path.join(dest_dir, name)
+    try:
+        _run_esptool(["--port", port, _esptool_cmd("read_flash"), "0", str(info["flash_bytes"]), path],
+                     timeout=BACKUP_TIMEOUT_SECS, on_progress=on_progress)
+    except FirmwareError:
+        if os.path.exists(path):  # don't leave a half-written dump that looks like a backup
+            os.remove(path)
+        raise
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    if size != info["flash_bytes"]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise FirmwareError(f"The backup is incomplete ({size} of {info['flash_bytes']} bytes) and was not kept.")
+    info.update(path=path, sha256=_sha256(path), created=datetime.now().isoformat(timespec="seconds"))
+    with open(path + ".json", "w", encoding="utf-8") as fh:
+        json.dump({k: info[k] for k in ("chip", "flash_bytes", "sha256", "created")}, fh, indent=2)
+    return info
+
+
+def check_backup_file(path: str, info: dict):
+    """(errors, warnings) for restoring `path` onto the chip described by `info`
+    (from esptool_flash_info). Only a full-flash image taken by this program
+    for the same chip type passes: writing anything else at offset 0 would
+    overwrite the bootloader with the wrong data and brick the board."""
+    errors, warnings = [], []
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        return [f"Can't read the file: {exc}"], []
+    if size != info["flash_bytes"]:
+        errors.append(
+            f"The file is {size / 1048576:.2f} MB but this device's flash is {info['flash_bytes'] >> 20} MB. "
+            "Only a full backup made by this program can be restored here; an ordinary firmware .bin "
+            "must be flashed with Erase + Flash instead.")
+    meta_path = path + ".json"
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, encoding="utf-8") as fh:
+                meta = json.load(fh)
+        except (OSError, ValueError):
+            meta = None
+            warnings.append("The backup's .json info file is unreadable, so the file can't be fully checked.")
+        if meta:
+            if meta.get("chip") and meta["chip"] != info["chip"]:
+                errors.append(f"This backup came from a {meta['chip']}, but the connected device is a {info['chip']}.")
+            if not errors and meta.get("sha256") and _sha256(path) != meta["sha256"]:
+                errors.append("The backup file doesn't match its recorded checksum — it is damaged or was changed.")
+    else:
+        warnings.append("There's no matching .json info file next to this backup, so it couldn't be checked "
+                        "against this board or for damage — only its size matched.")
+    return errors, warnings
+
+
+def esptool_restore_flash(port: str, backup_path: str, on_progress=None) -> str:
+    return _run_esptool(["--port", port, "write_flash", "0x0", backup_path],
+                        timeout=BACKUP_TIMEOUT_SECS, on_progress=on_progress)

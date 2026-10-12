@@ -376,6 +376,7 @@ class App(tk.Tk):
         self.latest_release = None
         self.fw_platform = None
         self.fw_path = None
+        self._fw_backup_dir = None   # last folder used for a firmware backup/restore
 
         self.ble_queue: "queue.Queue" = queue.Queue()
         self.printer_queue: "queue.Queue" = queue.Queue()
@@ -1262,12 +1263,22 @@ class App(tk.Tk):
         self.status_var.set("Deleting channel…")
 
     # ── Firmware tab ─────────────────────────────────────────────────────
+    FW_WAIT_NOTICE = (
+        "Updating firmware can take several minutes. Do not unplug the device, close this program or start "
+        "anything else while it runs — wait for the \"Flash Complete\" message, then give the device a minute "
+        "to restart before using it.")
+    FW_WAIT_SHORT = ("This can take several minutes. Wait for the \"Flash Complete\" message — don't unplug "
+                     "the device or close this window.")
+
     def _build_firmware_tab(self):
         f = self.tab_firmware
         info = tk.LabelFrame(f, text="Current Device", font=FB)
         info.pack(fill="x", padx=8, pady=8)
         self.fw_current_var = tk.StringVar(value="Not connected")
         tk.Label(info, textvariable=self.fw_current_var, font=FA, justify="left").pack(anchor="w", padx=8, pady=6)
+
+        tk.Label(f, text=self.FW_WAIT_NOTICE, font=FB, fg="#B26A00", justify="left", anchor="w",
+                  wraplength=900).pack(fill="x", padx=10, pady=(0, 6))
 
         manual = tk.LabelFrame(f, text="Board (for boards that can't stay connected in bootloader mode)", font=FB)
         manual.pack(fill="x", padx=8, pady=(0, 8))
@@ -1326,6 +1337,11 @@ class App(tk.Tk):
         self.btn_flash_esp.pack(side="left")
         tk.Button(row2, text="Erase Flash Only", font=FA, bg="#B71C1C", fg="white",
                    command=self._erase_esptool).pack(side="left", padx=8)
+        tk.Button(row2, text="Restore Backup…", font=FA,
+                   command=self._restore_firmware).pack(side="left", padx=(16, 0))
+        tk.Label(self.esp_frame, text="Erase + Flash offers to back up the current firmware first. "
+                                       "Restore Backup… writes a backup made that way back to the device.",
+                  font=FS, fg=DIM_FG, justify="left", wraplength=860).pack(anchor="w", padx=8, pady=(0, 6))
 
         self.fw_status_var = tk.StringVar(value="")
         tk.Label(f, textvariable=self.fw_status_var, font=FA, fg=DIM_FG, wraplength=900,
@@ -1450,15 +1466,25 @@ class App(tk.Tk):
         drive = sel.split("  ")[0] if sel else None
         if not drive or not self.fw_path:
             return
-        if not messagebox.askyesno("Confirm Flash", f"Copy {os.path.basename(self.fw_path)} to {drive}?"):
+        if not messagebox.askyesno(
+                "Confirm Flash",
+                f"Copy {os.path.basename(self.fw_path)} to {drive}?\n\n{self.FW_WAIT_SHORT}"):
             return
+        # The copy runs on this thread, so the window may stop responding until it finishes.
+        self.fw_status_var.set(f"Copying firmware to {drive}… {self.FW_WAIT_SHORT} "
+                               "This window may stop responding until the copy is done.")
+        self.update_idletasks()
         try:
             dest = fw.flash_uf2(self.fw_path, drive)
         except Exception as exc:
+            self.fw_status_var.set(f"Flash failed: {exc}")
             messagebox.showerror("Flash Failed", str(exc))
             return
-        self.fw_status_var.set(f"Flashed: copied to {dest}. Device will reboot automatically.")
-        messagebox.showinfo("Flash Complete", "Firmware copied. The device will reboot on its own.")
+        self.fw_status_var.set(f"Flash complete: copied to {dest}. The device is restarting — give it a "
+                               "minute before unplugging or reconnecting.")
+        messagebox.showinfo("Flash Complete",
+                            "Firmware copied. The device will now reboot on its own — give it a minute "
+                            "to finish before unplugging or reconnecting.")
 
     def _flash_esptool(self):
         self._run_esptool_action(erase_first=True)
@@ -1481,27 +1507,115 @@ class App(tk.Tk):
             messagebox.showwarning("Firmware", "Select the device's serial port on the Connection tab first.")
             return
         action = "erase and flash" if write else "erase"
-        if not messagebox.askyesno("Confirm", f"This will {action} the device over {port}. Continue?", icon="warning"):
+        if not messagebox.askyesno(
+                "Confirm", f"This will {action} the device over {port}. Continue?\n\n{self.FW_WAIT_SHORT}",
+                icon="warning"):
             return
         if self.client.is_connected():
             messagebox.showwarning("Disconnect First", "Disconnect from the device before flashing.")
             return
 
-        self.fw_status_var.set(f"Running esptool ({action})…")
+        backup_dir = None
+        if erase_first:
+            choice = messagebox.askyesnocancel(
+                "Save the Current Firmware?",
+                "Before erasing, save a copy of the firmware that's on the device now?\n\n"
+                "The copy is the whole flash — firmware, settings and keys — and is the only way back to "
+                "what's on it today. It can be restored later with \"Restore Backup…\". Keep the file "
+                "private: it contains the device's keys and any WiFi/MQTT passwords.\n\n"
+                "Yes — choose a folder and back up first (adds several minutes)\n"
+                "No — erase without a backup\n"
+                "Cancel — stop and change nothing",
+                icon="warning")
+            if choice is None:
+                self.fw_status_var.set("Cancelled — nothing was changed.")
+                return
+            if choice:
+                backup_dir = filedialog.askdirectory(
+                    title="Choose a folder for the firmware backup", mustexist=True,
+                    initialdir=self._fw_backup_dir or os.path.expanduser("~"))
+                if not backup_dir:
+                    self.fw_status_var.set("Cancelled — no folder chosen, nothing was changed.")
+                    return
+                self._fw_backup_dir = backup_dir
+
+        self.fw_status_var.set(f"{'Backing up, then running' if backup_dir else 'Running'} esptool "
+                               f"({action})… {self.FW_WAIT_SHORT}")
+
+        def progress(stage):
+            return lambda pct: self.fw_queue.put(
+                ("fw_progress", f"{stage} {pct}% — {self.FW_WAIT_SHORT}"))
 
         def worker():
+            backup_path = None
             try:
+                if backup_dir:
+                    self.fw_queue.put(("fw_progress", f"Backing up the current firmware… — {self.FW_WAIT_SHORT}"))
+                    # A failed backup stops here, before anything has been erased.
+                    backup_path = fw.esptool_backup_flash(port, backup_dir,
+                                                          on_progress=progress("Backing up the current firmware…"))["path"]
+                    self.fw_queue.put(("fw_progress", f"Backup saved: {backup_path} — now erasing… "
+                                                      f"{self.FW_WAIT_SHORT}"))
                 if erase_first:
                     fw.esptool_erase_flash(port)
                 if write:
-                    fw.esptool_write_flash(port, self.fw_path)
-                self.fw_queue.put(("fw_flashed", port))
+                    fw.esptool_write_flash(port, self.fw_path, on_progress=progress("Writing the new firmware…"))
+                self.fw_queue.put(("fw_flashed", (port, backup_path)))
             except fw.FirmwareError as exc:
-                self.fw_queue.put(("fw_error", f"esptool failed:\n{exc}"))
+                where = ("The backup failed, so NOTHING was erased.\n\n" if backup_dir and not backup_path else "")
+                self.fw_queue.put(("fw_error", f"{where}esptool failed:\n{exc}"))
             except Exception as exc:
                 self.fw_queue.put(("fw_error", f"esptool failed: {exc}"))
 
         threading.Thread(target=worker, daemon=True, name="fw-esptool").start()
+
+    def _restore_firmware(self):
+        if not fw.esptool_available():
+            messagebox.showerror("esptool Not Installed",
+                                 "Install it yourself first, then retry:\n\n    pip install esptool")
+            return
+        port = self._current_serial_port()
+        if not port:
+            messagebox.showwarning("Firmware", "Select the device's serial port on the Connection tab first.")
+            return
+        if self.client.is_connected():
+            messagebox.showwarning("Disconnect First", "Disconnect from the device before restoring.")
+            return
+        path = filedialog.askopenfilename(
+            title="Choose a firmware backup to restore", initialdir=self._fw_backup_dir or os.path.expanduser("~"),
+            filetypes=[("Firmware backup", "*.bin"), ("All files", "*.*")])
+        if not path:
+            return
+        self._fw_backup_dir = os.path.dirname(path)
+        self.fw_status_var.set("Checking the device and the backup file… (a few seconds)")
+
+        def worker():
+            try:
+                info = fw.esptool_flash_info(port)
+                errors, warnings = fw.check_backup_file(path, info)
+                self.fw_queue.put(("fw_restore_check", (port, path, info, errors, warnings)))
+            except fw.FirmwareError as exc:
+                self.fw_queue.put(("fw_error", f"Couldn't talk to the device:\n{exc}"))
+            except Exception as exc:
+                self.fw_queue.put(("fw_error", f"Couldn't talk to the device: {exc}"))
+
+        threading.Thread(target=worker, daemon=True, name="fw-restore-check").start()
+
+    def _start_restore(self, port: str, path: str):
+        self.fw_status_var.set(f"Restoring {os.path.basename(path)}… {self.FW_WAIT_SHORT}")
+
+        def worker():
+            try:
+                fw.esptool_restore_flash(
+                    port, path, on_progress=lambda pct: self.fw_queue.put(
+                        ("fw_progress", f"Restoring the backup… {pct}% — {self.FW_WAIT_SHORT}")))
+                self.fw_queue.put(("fw_restored", (port, path)))
+            except fw.FirmwareError as exc:
+                self.fw_queue.put(("fw_error", f"Restore failed:\n{exc}"))
+            except Exception as exc:
+                self.fw_queue.put(("fw_error", f"Restore failed: {exc}"))
+
+        threading.Thread(target=worker, daemon=True, name="fw-restore").start()
 
     def _current_serial_port(self):
         sel = self.serial_port.get()
@@ -2443,9 +2557,42 @@ class App(tk.Tk):
                 self.btn_flash_esp.config(state="normal")
             self._append_log(f"Firmware downloaded: {payload}")
 
+        elif kind == "fw_progress":
+            self.fw_status_var.set(payload)
+
         elif kind == "fw_flashed":
-            self.fw_status_var.set(f"Flash completed via {payload}.")
-            messagebox.showinfo("Flash Complete", "esptool finished successfully.")
+            port, backup_path = payload
+            note = f"\n\nThe previous firmware was saved to:\n{backup_path}" if backup_path else ""
+            self.fw_status_var.set(f"Flash completed via {port}." +
+                                   (f" Previous firmware backed up to {backup_path}" if backup_path else ""))
+            if backup_path:
+                self._append_log(f"Firmware backup saved: {backup_path}")
+            messagebox.showinfo("Flash Complete", "esptool finished successfully." + note)
+
+        elif kind == "fw_restore_check":
+            port, path, info, errors, warnings = payload
+            if errors:
+                self.fw_status_var.set("This file can't be restored to this device.")
+                messagebox.showerror("Can't Restore This File", "\n\n".join(errors))
+                return
+            if not messagebox.askyesno(
+                    "Restore Backup",
+                    f"Write {os.path.basename(path)} back to the {info['chip']} on {port}?\n\n"
+                    "This overwrites EVERYTHING on the device — firmware, settings and keys — with what was "
+                    "saved in the backup." +
+                    ("\n\n" + "\n".join(warnings) if warnings else "") + f"\n\n{self.FW_WAIT_SHORT}",
+                    icon="warning"):
+                self.fw_status_var.set("Restore cancelled — nothing was changed.")
+                return
+            self._start_restore(port, path)
+
+        elif kind == "fw_restored":
+            port, path = payload
+            self.fw_status_var.set(f"Restore complete via {port}. The device is restarting.")
+            self._append_log(f"Firmware restored from {path}")
+            messagebox.showinfo("Restore Complete",
+                                "The backup was written back. The device will restart — give it a minute "
+                                "before reconnecting.")
 
         elif kind == "fw_board_list":
             self.fw_board_manual["values"] = payload
