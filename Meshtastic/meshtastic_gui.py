@@ -1552,8 +1552,10 @@ class App(tk.Tk):
                 if backup_dir:
                     self.fw_queue.put(("fw_progress", f"Backing up the current firmware… — {self.FW_WAIT_SHORT}"))
                     # A failed backup stops here, before anything has been erased.
-                    backup_path = fw.esptool_backup_flash(port, backup_dir,
-                                                          on_progress=progress("Backing up the current firmware…"))["path"]
+                    backup_path = fw.esptool_backup_flash(
+                        port, backup_dir, on_progress=progress("Backing up the current firmware…"),
+                        on_note=lambda text: self.fw_queue.put(("fw_progress", f"{text} {self.FW_WAIT_SHORT}"))
+                    )["path"]
                     self.fw_queue.put(("fw_progress", f"Backup saved: {backup_path} — now erasing… "
                                                       f"{self.FW_WAIT_SHORT}"))
                 if erase_first:

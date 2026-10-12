@@ -397,23 +397,36 @@ def _sha256(path: str) -> str:
     return digest.hexdigest()
 
 
-def esptool_backup_flash(port: str, dest_dir: str, on_progress=None) -> dict:
+FAST_READ_BAUD = "460800"   # ~3.4x esptool 5's default; 921600 corrupted reads on a ThinkNode M7 (CH340K)
+
+
+def esptool_backup_flash(port: str, dest_dir: str, on_progress=None, on_note=None) -> dict:
     """
     Dump the whole flash to dest_dir/<name>.bin plus a <name>.bin.json info file
     (chip, size, SHA-256) that lets a later restore check the file. Returns the
     info dict including 'path'. Raises FirmwareError if the dump isn't complete.
+
+    The dump first runs at FAST_READ_BAUD; if that fails (some USB-serial chips
+    can't hold the speed) it is redone from scratch at esptool's default speed,
+    telling on_note(text) so the user sees why it restarted.
     """
     info = esptool_flash_info(port)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"meshtastic_flash_backup_{info['chip']}_{info['flash_bytes'] >> 20}MB_{stamp}.bin"
     path = os.path.join(dest_dir, name)
-    try:
-        _run_esptool(["--port", port, _esptool_cmd("read_flash"), "0", str(info["flash_bytes"]), path],
-                     timeout=BACKUP_TIMEOUT_SECS, on_progress=on_progress)
-    except FirmwareError:
-        if os.path.exists(path):  # don't leave a half-written dump that looks like a backup
-            os.remove(path)
-        raise
+    read = ["0", str(info["flash_bytes"]), path]
+    for baud in (FAST_READ_BAUD, None):
+        args = ["--port", port] + (["--baud", baud] if baud else []) + [_esptool_cmd("read_flash")] + read
+        try:
+            _run_esptool(args, timeout=BACKUP_TIMEOUT_SECS, on_progress=on_progress)
+            break
+        except FirmwareError:
+            if os.path.exists(path):  # never leave a half-written dump that looks like a backup
+                os.remove(path)
+            if baud is None:
+                raise
+            if on_note:
+                on_note("The faster read speed failed, so the backup is restarting at the normal (slower) speed…")
     size = os.path.getsize(path) if os.path.exists(path) else 0
     if size != info["flash_bytes"]:
         try:
