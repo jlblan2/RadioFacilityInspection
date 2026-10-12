@@ -1572,6 +1572,9 @@ class App(tk.Tk):
         self.mqtt_map_precision = tk.Entry(mapf, font=FA, width=10)
         self.mqtt_map_precision.grid(row=3, column=1, sticky="w", padx=8)
 
+        self.mqtt_net_note = tk.Label(f, text="", font=FS, fg="#B26A00", anchor="w", justify="left", wraplength=900)
+        self.mqtt_net_note.pack(fill="x", padx=8)
+
         btns = tk.Frame(f)
         btns.pack(fill="x", padx=8, pady=(0, 8))
         self.btn_save_mqtt = tk.Button(btns, text="Save Changes", font=FB, bg="#2E7D32", fg="white",
@@ -1605,8 +1608,21 @@ class App(tk.Tk):
         self.mqtt_map_report_location.set(s["map_should_report_location"])
         self.mqtt_map_interval.delete(0, "end"); self.mqtt_map_interval.insert(0, str(s["map_publish_interval_secs"]))
         self.mqtt_map_precision.delete(0, "end"); self.mqtt_map_precision.insert(0, str(s["map_position_precision"]))
+        self.mqtt_net_note.config(text=self._mqtt_no_network_text())
         self.btn_save_mqtt.config(state="normal")
         self.btn_discard_mqtt.config(state="normal")
+
+    NO_NETWORK_MQTT_NOTE = (
+        "This radio has no WiFi or Ethernet hardware, so it can't reach an MQTT broker by itself. Its firmware "
+        "ignores \"Enabled\" unless \"Proxy to Client Enabled\" is also on, which sends MQTT through a connected "
+        "phone or computer app that has internet.")
+
+    def _mqtt_no_network_text(self) -> str:
+        try:
+            hw = self.client.get_network_hardware()
+        except Exception:
+            return ""
+        return self.NO_NETWORK_MQTT_NOTE if hw["known"] and not (hw["has_wifi"] or hw["has_ethernet"]) else ""
 
     def _save_mqtt_settings(self):
         if not self.client.is_connected():
@@ -1617,8 +1633,16 @@ class App(tk.Tk):
         except ValueError:
             messagebox.showwarning("Invalid Value", "Publish Interval and Position Precision must be numeric.")
             return
+        if (self.mqtt_enabled.get() and not self.mqtt_proxy.get() and self._mqtt_no_network_text()):
+            # Without this the radio reboots, drops the setting, and the save still looks successful.
+            if not messagebox.askyesno(
+                    "No Network Hardware",
+                    self.NO_NETWORK_MQTT_NOTE + "\n\nTurn on \"Proxy to Client Enabled\" and continue?"):
+                return
+            self.mqtt_proxy.set(True)
         if not messagebox.askyesno("Confirm Save",
-                                    "Write these MQTT settings to the device? It may reboot to apply them."):
+                                    "Write these MQTT settings to the device? The radio reboots to apply them, "
+                                    "so the connection will drop — reconnect afterwards."):
             return
         settings = {
             "enabled": self.mqtt_enabled.get(),
@@ -2528,7 +2552,11 @@ class App(tk.Tk):
             self.status_var.set("MQTT settings saved")
             self.btn_save_mqtt.config(state="normal")
             self._append_log("MQTT settings saved")
-            messagebox.showinfo("MQTT", "MQTT settings saved to device.")
+            messagebox.showinfo(
+                "MQTT",
+                "MQTT settings sent to the device. It reboots to apply them, so the connection will drop "
+                "(a \"serial port disconnected\" message is normal). Reconnect and check this tab to confirm "
+                "they stuck.")
 
         elif kind == "network_saved":
             self.status_var.set("Network settings saved — the device is rebooting")

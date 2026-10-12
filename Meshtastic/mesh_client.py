@@ -729,6 +729,14 @@ class MeshClient:
             "map_should_report_location": m.map_report_settings.should_report_location,
         }
 
+    def get_network_hardware(self) -> dict:
+        """Whether the radio has any network hardware at all, from its device
+        metadata ('known' is False when the device hasn't reported any)."""
+        meta = self.interface.metadata if self.interface is not None else None
+        if meta is None:
+            return {"known": False, "has_wifi": False, "has_ethernet": False}
+        return {"known": True, "has_wifi": bool(meta.hasWifi), "has_ethernet": bool(meta.hasEthernet)}
+
     def save_mqtt_settings(self, settings: dict):
         """
         Push the MQTT module config to the device. Runs on a background
