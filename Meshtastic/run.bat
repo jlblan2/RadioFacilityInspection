@@ -11,10 +11,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python -c "import meshtastic, pubsub, tkinter" >nul 2>&1
+rem Also checks for a feature the app needs, so an older meshtastic that is already installed gets upgraded.
+python -c "import meshtastic, pubsub, tkinter; from meshtastic.protobuf import config_pb2; config_pb2.Config.LoRaConfig.FEM_LNA_Mode" >nul 2>&1
 if errorlevel 1 (
     echo Installing required packages ^(one-time^)...
-    python -m pip install meshtastic truststore esptool
+    python -m pip install --upgrade meshtastic truststore esptool
     if errorlevel 1 (
         echo.
         echo Package install failed. If the error mentions tkinter, reinstall Python with
