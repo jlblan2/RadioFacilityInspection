@@ -27,19 +27,35 @@ if errorlevel 1 (
     exit /b 1
 )
 
-call %PY% -c "import sys,struct,sysconfig; ok=(3,10)<=sys.version_info[:2]<=(3,14) and not sysconfig.get_config_var('Py_GIL_DISABLED'); print('Using Python', sys.version.split()[0], str(struct.calcsize('P')*8)+'-bit'); sys.exit(0 if ok else 3)"
+rem Prints which Python this is. Exit 3 = older than 3.10 (the app cannot run), 4 = too new or free-threaded.
+call %PY% -c "import sys,struct,sysconfig; v=sys.version_info[:2]; bad=v>(3,14) or bool(sysconfig.get_config_var('Py_GIL_DISABLED')); print('Using Python', sys.version.split()[0], str(struct.calcsize('P')*8)+'-bit'); sys.exit(3 if v<(3,10) else 4 if bad else 0)"
 set "PYSTATUS=%errorlevel%"
 if "%PYSTATUS%"=="3" (
     echo.
-    echo WARNING: this Python is outside the 3.10 - 3.14 range ^(or is a free-threaded build^). The Windows
-    echo Bluetooth packages the app needs have no prebuilt version for it, so the install below will
-    echo probably fail. If it does, install Python 3.13 ^(64-bit^) from python.org/downloads and run this
-    echo file again.
+    echo This Python is older than 3.10, which the app needs. Install Python 3.13 ^(64-bit^) from
+    echo python.org/downloads, keep the "py launcher" option ticked, and run this file again.
+    pause
+    exit /b 1
+)
+if "%PYSTATUS%"=="4" (
+    echo.
+    echo WARNING: this Python is newer than 3.14 ^(or is a free-threaded build^). The Windows Bluetooth
+    echo packages the app needs have no prebuilt version for it, so the install below will probably
+    echo fail. If it does, install Python 3.13 ^(64-bit^) from python.org/downloads and run this file again.
     echo.
 )
 
-rem Also checks for a feature the app needs, so an older meshtastic that is already installed gets upgraded.
-call %PY% -c "import meshtastic, pubsub, tkinter; from meshtastic.protobuf import config_pb2; config_pb2.Config.LoRaConfig.FEM_LNA_Mode" >nul 2>&1
+call %PY% -c "import tkinter" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo tkinter, the window toolkit, is missing from this Python and pip cannot add it.
+    echo Reinstall Python and make sure "tcl/tk and IDLE" is ticked.
+    pause
+    exit /b 1
+)
+
+rem The check also needs a feature from recent meshtastic releases, so an old copy gets upgraded.
+call %PY% -c "import meshtastic, pubsub; from meshtastic.protobuf import config_pb2; config_pb2.Config.LoRaConfig.FEM_LNA_Mode" >nul 2>&1
 if errorlevel 1 (
     echo Installing required packages ^(one-time^)...
     call %PY% -m pip install --upgrade meshtastic truststore esptool
@@ -50,8 +66,18 @@ if errorlevel 1 (
         echo     free-threaded build, and the Bluetooth packages have no prebuilt version for it.
         echo     Install Python 3.13 ^(64-bit^) from python.org/downloads, keep the "py launcher" option
         echo     ticked, then run this file again - it picks 3.13 automatically.
-        echo   - tkinter in the error: reinstall Python with "tcl/tk and IDLE" checked.
         echo   - Anything else: check the internet connection and try again.
+        pause
+        exit /b 1
+    )
+    call %PY% -c "import meshtastic, pubsub; from meshtastic.protobuf import config_pb2; config_pb2.Config.LoRaConfig.FEM_LNA_Mode" >nul 2>&1
+    if errorlevel 1 (
+        echo.
+        echo The install finished, but the meshtastic package is still too old for this app:
+        call %PY% -m pip show meshtastic 2>nul | findstr /b "Name Version"
+        echo This usually means pip could only find an old release for this Python ^(older than 3.10, or
+        echo 3.15 and newer^). Install Python 3.13 ^(64-bit^) from python.org/downloads, keep the
+        echo "py launcher" option ticked, and run this file again.
         pause
         exit /b 1
     )
