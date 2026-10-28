@@ -16,6 +16,7 @@ import os, sys, io, pathlib
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 
+import disclaimer
 from netlog import (
     NetSession, CheckIn, rank_checkins,
     lookup_operator, lookup_city, lookup_state, lookup_sector,
@@ -2924,6 +2925,8 @@ class NetLogApp(tk.Tk):
         mb.add_cascade(label='Help', menu=hm)
         hm.add_command(label='Keyboard Shortcuts', command=self._show_shortcuts)
         hm.add_separator()
+        hm.add_command(label='Disclaimer',
+                       command=lambda: disclaimer.show(self, 'HF Contingency Net Log'))
         hm.add_command(label='About', command=self._show_about)
 
     def _build_notebook(self):
@@ -3047,6 +3050,8 @@ def main():
         idx = args.index('--load')
         if idx + 1 < len(args):
             load_path = args[idx + 1]
+    if not disclaimer.require('HF Contingency Net Log'):
+        return
     app = NetLogApp(load_path=load_path)
     app.mainloop()
 

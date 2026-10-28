@@ -33,6 +33,7 @@ from mesh_client import (
     lora_region_limits, lora_valid_presets, lora_valid_bw_codes, lora_preset_params, lora_bw_khz, lora_bw_code,
     lora_slot_count, lora_slot_freq_mhz, lora_max_power, lora_effective_bw_khz, validate_lora_settings,
 )
+import disclaimer
 import firmware as fw
 import netdiscovery
 import printing
@@ -403,6 +404,9 @@ class App(tk.Tk):
                   padx=12, pady=8).pack(side="left")
         self.hdr_status = tk.Label(hdr, text="Disconnected", font=FB, bg=HDR_BG, fg="#FF8080", padx=12)
         self.hdr_status.pack(side="right")
+        tk.Button(hdr, text="Disclaimer", font=FB, relief="flat", bg=HDR_BG, fg=HDR_FG,
+                  activebackground=HDR_BG, activeforeground=HDR_FG, cursor="hand2",
+                  command=lambda: disclaimer.show(self, "Meshtastic Control")).pack(side="right")
 
     def _build_notebook(self):
         nb = ttk.Notebook(self)
@@ -2775,4 +2779,5 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    if disclaimer.require("Meshtastic Control"):
+        App().mainloop()
