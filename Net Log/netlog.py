@@ -1399,7 +1399,7 @@ def _prompt(label: str, default: str = "", choices: list = None, required: bool 
 
 def print_session_header(session: NetSession):
     print("\n" + "="*70)
-    print(" USCG AUXILIARY SOUTHEAST HF CONTINGENCY NET LOG")
+    print(" USCG AUXILIARY HF CONTINGENCY NET LOG")
     print(f" Freq Type: {session.freq_type}  |  Net: {session.net_name}")
     print(f" Date: {session.net_date}  |  Start: {session.start_time}  |  NCS: {session.ncs_callsign}")
     print(f" Primary: {session.primary_freq}  |  Transceiver: {session.transceiver}")
@@ -1538,7 +1538,7 @@ def run_interactive(session: NetSession, dist_matrix: dict, bear_matrix: dict):
 
 def new_session_wizard(dist_matrix: dict, bear_matrix: dict) -> NetSession:
     print("\n+==================================================================+")
-    print("|  USCG AUXILIARY D7 HF CONTINGENCY NET LOG  --  New Session      |")
+    print("|  USCG AUXILIARY HF CONTINGENCY NET LOG  --  New Session         |")
     print("+==================================================================+\n")
 
     session = NetSession()

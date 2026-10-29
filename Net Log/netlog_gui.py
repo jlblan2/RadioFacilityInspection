@@ -2218,7 +2218,7 @@ class MaintenanceTab(ttk.Frame):
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>USCG Aux D7 Net Log — {self._cur_name}</title>
+<title>USCG Aux Net Log — {self._cur_name}</title>
 <style>
   body  {{ font-family: Arial, sans-serif; font-size: 11px; margin: 24px; color: #222; }}
   h2    {{ color: #1F4E79; margin-bottom: 2px; font-size: 15px; }}
@@ -2234,7 +2234,7 @@ class MaintenanceTab(ttk.Frame):
 </style>
 </head>
 <body>
-<h2>USCG Auxiliary — Southeast District 7 — HF Contingency Net Log</h2>
+<h2>USCG Auxiliary — HF Contingency Net Log</h2>
 <p class="sub">
   Table: <strong>{self._cur_name}</strong> &nbsp;|&nbsp;
   Generated: {ts} &nbsp;|&nbsp;
@@ -2245,7 +2245,7 @@ class MaintenanceTab(ttk.Frame):
   <tbody>{tb_rows}</tbody>
 </table>
 <p class="sub" style="margin-top:10px">
-  Source: {cfg.get('db_name', 'netlog.db')} &nbsp;|&nbsp; USCG Auxiliary District 7
+  Source: {cfg.get('db_name', 'netlog.db')} &nbsp;|&nbsp; USCG Auxiliary
 </p>
 </body></html>"""
 
@@ -2314,9 +2314,6 @@ class LoginDialog(tk.Frame):
                  text='UNITED STATES COAST GUARD AUXILIARY',
                  font=(_FF, 12, 'bold'), bg=HDR_BG, fg=HDR_FG,
                  pady=14).pack()
-        tk.Label(top,
-                 text='Seventh District  —  Southeast',
-                 font=(_FF, 10), bg=HDR_BG, fg=HDR_DIM).pack(pady=(0, 10))
 
         # ── App title strip ───────────────────────────────────────────────────
         title_strip = tk.Frame(self, bg='#163D5E')
@@ -2792,7 +2789,7 @@ class NetLogApp(tk.Tk):
         # ── Authenticated — build the full application ────────────────────────
         self.resizable(True, True)
         self.protocol('WM_DELETE_WINDOW', self.destroy)
-        self.title('USCG Auxiliary Southeast HF Contingency Net Log')
+        self.title('USCG Auxiliary HF Contingency Net Log')
         self.geometry('1220x840')
         self.minsize(950, 640)
 
@@ -2873,7 +2870,7 @@ class NetLogApp(tk.Tk):
     # ── UI construction ───────────────────────────────────────────────────────
     def _build_title_bar(self):
         tk.Label(self,
-                 text='  USCG AUXILIARY SOUTHEAST HF CONTINGENCY NET LOG  ',
+                 text='  USCG AUXILIARY HF CONTINGENCY NET LOG  ',
                  font=(_FF, 14, 'bold'),
                  bg=HDR_BG, fg=HDR_FG, pady=7).pack(fill='x')
 
@@ -3031,7 +3028,7 @@ class NetLogApp(tk.Tk):
 
     def _show_about(self):
         messagebox.showinfo('About',
-            'USCG Auxiliary Southeast District 7\n'
+            'USCG Auxiliary\n'
             'HF Contingency Net Log  —  GUI Edition\n\n'
             'Data layer:   netlog.py\n'
             'Member DB:    netlog.db       (SQLite)\n'
