@@ -7,6 +7,7 @@ CONTENTS OF THIS PACKAGE
 -------------------------
   netlog.py               Data layer (logic, database, calculations)
   netlog_gui.py           Graphical user interface
+  netlog.db               Members, reference data, frequencies, email list
   netlog_db_schema.sql    Members/reference database schema (reference)
   net_archives_db_schema.sql  Archive database schema (reference)
   netlog_db_schema.pdf    Members database diagram (reference)
@@ -23,11 +24,13 @@ OVERVIEW
 --------
 The Net Log application is a Python/tkinter program that replaces the
 original Excel-based NetLog.xlsm workbook.  It stores member data and
-net session archives in two SQLite databases that are created
-automatically in the same folder as the program on the first run:
+net session archives in two SQLite databases in the same folder as the
+program:
 
-  netlog.db           Members, reference data, email list
-  net_archives.db     Completed session archives
+  netlog.db           Members, reference data, email list (included in
+                      this package)
+  net_archives.db     Completed session archives (not included; created
+                      empty on the first run)
 
 
 STEP 1 — INSTALL PYTHON
@@ -85,8 +88,10 @@ A suggested location is:
 
     C:\Users\<YourName>\Documents\NetLog\
 
-The program will create the two SQLite databases (netlog.db and
-net_archives.db) in that same folder the first time it runs.
+Keep netlog.db in that same folder: it holds the members, frequencies
+and other reference data.  The program creates net_archives.db there the
+first time it runs.  If you already have a netlog.db with your own
+changes, keep yours instead of copying this one over it.
 
 If you have an existing NetLog.xlsm file you may place it in the
 same folder.  The program will decrypt and read the DISTANCE and
