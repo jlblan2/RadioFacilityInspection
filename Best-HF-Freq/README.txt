@@ -3,7 +3,8 @@ Best-HF-Freq 1.0
 Copyright (c) 2026 N. Tesla, Inc. All rights reserved. See LICENSE.
 
 Picks the HF frequency most likely to work right now, from live solar, geomagnetic and
-ionosonde data, and shows how that changes hour by hour over the next 24 hours.
+ionosonde data plus atmospherics (static from thunderstorms), and shows how that changes
+hour by hour over the next 24 hours.
 
 
 RUNNING IT
@@ -52,6 +53,8 @@ DATA SOURCES
 NOAA Space Weather Prediction Center (services.swpc.noaa.gov): 10.7 cm solar flux, planetary
 K index, GOES X-ray flux, NOAA R/S/G space-weather scales.
 KC2G (prop.kc2g.com): effective sunspot number and latest GIRO / NOAA ionosonde readings.
+Open-Meteo (open-meteo.com): where thunderstorms are now and over the next 24 hours, on a grid
+around the path, for atmospheric static. Weather data by Open-Meteo.com (CC BY 4.0).
 
 
 LIMITS
@@ -62,6 +65,9 @@ This is a planning aid, not a substitute for listening, ALE soundings or officia
 - Ground wave is not modeled: paths under 30 km are treated as 30 km NVIS.
 - Sporadic-E openings and the grey-line enhancement are not predicted.
 - Forecast hours assume no solar flares.
+- Thunderstorm areas come from a weather model (Open-Meteo), not from lightning detection,
+  sampled on a grid about 200 km apart, so a single small storm can be missed. Static from
+  storms is assumed loud within about 250 km and noticeable within 800 km (more at night).
 
 
 FILES

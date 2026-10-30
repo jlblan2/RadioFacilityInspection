@@ -10,7 +10,7 @@ Usage:
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 import os, sys, io, pathlib, re, threading, time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -1207,9 +1207,15 @@ class SessionTab(ttk.Frame):
 
         tk.Label(inner, text='SESSION SETUP', font=FT,
                  fg=HDR_BG).grid(row=0, column=0, columnspan=2, pady=(16, 8))
-
         _FREQ_KEYS = {'primary_freq', 'alt_freq_1', 'alt_freq_2'}
         _CS_KEYS   = {'ncs_callsign', 'station_callsign', 'ancs_callsign'}
+        self._prop_vars = {k: tk.StringVar() for k in self._PROP_KEYS}
+        self._prop_labels = {}
+        self._prop_note = tk.StringVar()
+        self._prop_now = tk.BooleanVar(value=False)
+        self._prop_after = None
+        self._prop_busy = self._prop_pending = False
+        self._prop_out = None
         i = 0
         for lbl, key, wtype, vals in self._FIELDS:
             i += 1
@@ -1234,11 +1240,31 @@ class SessionTab(ttk.Frame):
                     w.bind('<<ComboboxSelected>>',
                            lambda e, _w=w: self._freq_selected(_w))
                 elif key == 'net_name':
-                    w.bind('<<ComboboxSelected>>', lambda e: self._best_hf_update())
+                    w.bind('<<ComboboxSelected>>',
+                           lambda e: (self._best_hf_update(), self._prop_schedule()))
             else:
                 w = tk.Entry(inner, textvariable=v,
                              font=FA, bg=ENTRY_BG, width=38)
-            w.grid(row=i, column=1, sticky='w', padx=(0, 40), pady=5)
+            w.grid(row=i, column=1, sticky='w', padx=(0, 12 if key in _FREQ_KEYS else 40), pady=5)
+            if key in _FREQ_KEYS:
+                # Expected propagation on this frequency, to the right of it.
+                pl = tk.Label(inner, textvariable=self._prop_vars[key], font=FB,
+                              anchor='w', width=38)
+                pl.grid(row=i, column=2, sticky='w', padx=(0, 24), pady=5)
+                self._prop_labels[key] = pl
+                if key == 'primary_freq':
+                    # The checkbox and what the figures are based on, to the right of them.
+                    side = tk.Frame(inner)
+                    side.grid(row=i, column=3, rowspan=4, sticky='nw', padx=(0, 16), pady=5)
+                    tk.Checkbutton(side, text='Check current expected\npropagation conditions',
+                                   justify='left',
+                                   variable=self._prop_now, font=FA,
+                                   command=self._prop_schedule).pack(anchor='w')
+                    tk.Label(side, textvariable=self._prop_note, font=FS, fg='#555',
+                             anchor='w', justify='left', wraplength=300).pack(
+                        anchor='w', padx=(22, 0), pady=(4, 0))
+            if key in ('primary_freq', 'alt_freq_1', 'alt_freq_2', 'net_date', 'start_time'):
+                v.trace_add('write', lambda *_: self._prop_schedule())
             if key in _CS_KEYS:
                 self._cs_entries[key] = w
                 w.bind('<Return>',   lambda _, _k=key: self._lookup_session_cs(_k))
@@ -1265,6 +1291,7 @@ class SessionTab(ttk.Frame):
             self._cs_resolving = False
         if key in ('ncs_callsign', 'station_callsign') and v.get() != self._hf_from:
             self._best_hf_update()
+            self._prop_schedule()
 
     # ── Best HF now (Best-HF-Freq engine) ─────────────────────────────────────
     _HF_NET_RADIUS_KM = 2500       # members farther from the NCS are left out
@@ -1284,7 +1311,7 @@ class SessionTab(ttk.Frame):
         tk.Label(parent, text='Best HF Now:', font=FA, anchor='e').grid(
             row=row, column=0, sticky='ne', padx=(40, 8), pady=5)
         box = tk.Frame(parent, bg=AUTO_BG, bd=1, relief='solid')
-        box.grid(row=row, column=1, sticky='w', padx=(0, 40), pady=5)
+        box.grid(row=row, column=1, columnspan=2, sticky='w', padx=(0, 12), pady=5)
         for k, v in enumerate(self._hf_vars):
             tk.Label(box, textvariable=v, font=FB if k == 0 else FA, bg=AUTO_BG,
                      anchor='w', width=34).grid(row=k, column=0, sticky='w', padx=6)
@@ -1313,12 +1340,15 @@ class SessionTab(ttk.Frame):
     @staticmethod
     def _hf_channels():
         """The database frequency codes as Best-HF-Freq channels, named by their display string."""
-        out = []
-        for disp in FREQ_DISPLAY:
-            m = re.match(r'\s*([^:]+):\s*([\d.]+)\s*MHz', disp or '', re.I)
-            if m and 1.5 <= float(m.group(2)) <= 30:
-                out.append(hfprop.Channel(disp, float(m.group(2))))
-        return out
+        return [c for c in map(SessionTab._hf_channel, FREQ_DISPLAY) if c]
+
+    @staticmethod
+    def _hf_channel(disp):
+        """'A2A:   2.1242 MHz' -> Channel, or None if it is not an HF frequency."""
+        m = re.match(r'\s*([^:]+):\s*([\d.]+)\s*MHz', disp or '', re.I)
+        if m and 1.5 <= float(m.group(2)) <= 30:
+            return hfprop.Channel(disp, float(m.group(2)))
+        return None
 
     @staticmethod
     def _hf_members(home, exclude):
@@ -1337,43 +1367,74 @@ class SessionTab(ttk.Frame):
                 out.append(hf_planner.Target(r['callsign'], lat, lon))
         return out
 
+    def _hf_setup(self):
+        """(callsign, home, members, mode, problem). Database reads stay on the Tk thread;
+        only the downloads and the maths run in the background."""
+        call = self._vars['ncs_callsign'].get().strip() or self._vars['station_callsign'].get().strip()
+        home = lookup_coords(call) if call else (None, None)
+        mode = ('Digital (ALE / VARA / PSK)' if 'DIGITAL' in self._vars['net_name'].get().upper()
+                else 'SSB voice')
+        if home[0] is None:
+            return call, None, [], mode, (
+                'Enter an NCS callsign whose member record has a latitude and longitude '
+                'to see propagation for the net.' if not call else
+                f'{call} has no latitude/longitude in Members, so propagation for the net '
+                'cannot be worked out.')
+        targets = self._hf_members(home, call)
+        if not targets:
+            return call, home, [], mode, (
+                f'No net members with a position within {self._HF_NET_RADIUS_KM} km of {call}.')
+        return call, home, targets, mode, None
+
+    def _hf_cond_fresh(self):
+        return (self._hf_cond is not None
+                and time.time() - self._hf_cond_at < self._HF_REFRESH_MS / 1000)
+
+    @staticmethod
+    def _hf_atmospherics(res, thunder, n):
+        """'static moderate, no thunderstorms near the net' for a result."""
+        level = max(p.atmospheric_db for p in res.paths)
+        static = 'high' if level >= 10 else 'moderate' if level >= -5 else 'low'
+        near = hf_planner.storms_near(res)
+        if thunder is None:
+            storms = 'thunderstorm data unavailable, season and time of day only'
+        elif not thunder.covers(res.when):
+            storms = 'beyond the thunderstorm forecast, season and time of day only'
+        elif near:
+            storms = f'thunderstorms near {near} of {n} members'
+        else:
+            storms = 'no thunderstorms near the net'
+        return f'static {static}, {storms}'
+
     def _best_hf_update(self, force=False):
         if hfprop is None:
             return
         if self._hf_busy:              # one at a time; run again when this one ends
             self._hf_pending = True
             return
-        # Database reads stay on this thread; only the download and the maths run in the background.
-        call = self._vars['ncs_callsign'].get().strip() or self._vars['station_callsign'].get().strip()
-        home = lookup_coords(call) if call else (None, None)
+        channels = self._hf_channels()
+        call, home, targets, mode, problem = self._hf_setup()
         self._hf_from = call
-        if home[0] is None:
+        if problem or not channels:
             for v in self._hf_vars:
                 v.set('')
             self._hf_best = []
             self._hf_use_btn.config(state='disabled')
-            self._hf_note.set('Enter an NCS callsign whose member record has a latitude and '
-                              'longitude to see the best frequencies for the net.' if not call else
-                              f'{call} has no latitude/longitude in Members, so the best '
-                              'frequencies cannot be worked out.')
+            self._hf_note.set(problem or 'No frequencies in the database.')
             return
-        channels = self._hf_channels()
-        targets = self._hf_members(home, call)
-        if not channels or not targets:
-            self._hf_note.set('No frequencies in the database.' if not channels else
-                              f'No net members with a position within {self._HF_NET_RADIUS_KM} km of {call}.')
-            return
-        mode = ('Digital (ALE / VARA / PSK)' if 'DIGITAL' in self._vars['net_name'].get().upper()
-                else 'SSB voice')
-        refetch = force or self._hf_cond is None or time.time() - self._hf_cond_at > self._HF_REFRESH_MS / 1000
+        refetch = force or not self._hf_cond_fresh()
         cond = None if refetch else self._hf_cond
 
         def work():
             try:
                 c = cond or spacewx.get_conditions()
-                iono = hfprop.Ionosphere(c.model_ssn, c.kp, c.xray_flux, c.ionosondes)
+                # Atmospherics: thunderstorm areas around the net (fetched at most hourly).
+                thunder = spacewx.thunderstorms_around([home] + [(t.lat, t.lon) for t in targets])
+                iono = hfprop.Ionosphere(c.model_ssn, c.kp, c.xray_flux, c.ionosondes,
+                                         thunder=thunder)
                 margin = hfprop.station_margin(mode, self._HF_WATTS)
                 res = hf_planner.evaluate(iono, home, targets, channels, margin, iono.now)
+                res.thunder = thunder
                 self._hf_out = (c, res, None)
             except Exception as e:
                 self._hf_out = (None, None, e)
@@ -1402,6 +1463,7 @@ class SessionTab(ttk.Frame):
         call, mode, n, refetched = self._hf_ctx
         if refetched:
             self._hf_cond, self._hf_cond_at = c, time.time()
+            self._prop_schedule()         # new space weather: redo the expected propagation
         top = self._hf_pick_bands(res.ranking)
         self._hf_best = [x.channel.name for x in top]
         for k, v in enumerate(self._hf_vars):
@@ -1417,7 +1479,8 @@ class SessionTab(ttk.Frame):
         stale = '  (offline: using the last data downloaded)' if c.errors else ''
         self._hf_note.set(
             f'Net of {n} members within {self._HF_NET_RADIUS_KM} km of {call}, {mode.split(" (")[0]} '
-            f'{self._HF_WATTS} W.  {sfi}{kp}X-ray {c.xray_class}.  '
+            f'{self._HF_WATTS} W.  Solar: {sfi}{kp}X-ray {c.xray_class}.  '
+            f'Atmospherics: {self._hf_atmospherics(res, res.thunder, n)}.  '
             f'As of {datetime.now(timezone.utc):%H%M}Z.  % = average chance of working each '
             f'member now; each pick is from a different band (code letter), and within 3% '
             f'the higher frequency wins (less noise and absorption).{stale}')
@@ -1454,6 +1517,155 @@ class SessionTab(ttk.Frame):
             self._vars[key].set(disp)
         self.app.set_status('Best HF frequencies copied to Primary / 1st Alt / 2nd Alt - '
                             'press Apply Session Settings to keep them.')
+
+    # ── Expected propagation on the chosen frequencies ────────────────────────
+    _PROP_KEYS = ('primary_freq', 'alt_freq_1', 'alt_freq_2')
+    _PROP_COLORS = {'Excellent': '#1B7A1B', 'Good': '#1B7A1B', 'Fair': '#B36B00',
+                    'Poor': '#B00020', 'Closed': '#B00020'}
+
+    def _prop_schedule(self):
+        """Recalculate shortly after the last change (typing fires on every key)."""
+        if self._prop_after:
+            self.after_cancel(self._prop_after)
+        self._prop_after = self.after(700, self._prop_update)
+
+    def _prop_net_time(self):
+        """Net date + start time (local) as a UTC datetime, or None if not entered properly."""
+        d = self._vars['net_date'].get().strip()
+        t = self._vars['start_time'].get().strip().replace(':', '')
+        if not (len(t) == 4 and t.isdigit()):
+            return None
+        for fmt in ('%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y'):
+            try:
+                day = datetime.strptime(d, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+        try:
+            local = day.replace(hour=int(t[:2]), minute=int(t[2:]))
+        except ValueError:
+            return None
+        return local.astimezone().astimezone(timezone.utc)   # naive = local time
+
+    def _prop_show(self, note, texts=None):
+        for k in self._PROP_KEYS:
+            text, color = (texts or {}).get(k, ('', 'black'))
+            self._prop_vars[k].set(text)
+            self._prop_labels[k].config(fg=color)
+        self._prop_note.set(note)
+
+    def _prop_update(self):
+        self._prop_after = None
+        if hfprop is None:
+            self._prop_show('Expected propagation needs the Best-HF-Freq app (hfprop.py, '
+                            'spacewx.py, planner.py) next to this program.')
+            return
+        if self._prop_busy:
+            self._prop_pending = True
+            return
+        freqs = {k: self._vars[k].get().strip() for k in self._PROP_KEYS}
+        if not all(freqs.values()):
+            self._prop_show('Expected propagation is worked out once the Primary, 1st Alt and '
+                            '2nd Alt frequencies are all filled in.')
+            return
+        channels = {k: self._hf_channel(f) for k, f in freqs.items()}
+        bad = [freqs[k] for k, c in channels.items() if c is None]
+        if bad:
+            self._prop_show(f'Not an HF frequency from the list: {", ".join(bad)}.')
+            return
+        now = datetime.now(timezone.utc)
+        past = False
+        if self._prop_now.get():
+            when = None
+        else:
+            when = self._prop_net_time()
+            if when is None:
+                self._prop_show('Enter the Net Date (YYYY-MM-DD) and Start Time (HHMM, local) '
+                                'to see the propagation expected for the net, or tick "Check '
+                                'current expected propagation conditions".')
+                return
+            if when < now - timedelta(hours=1):
+                when, past = None, True      # no forecast for the past: show conditions now
+        call, home, targets, mode, problem = self._hf_setup()
+        if problem:
+            self._prop_show(problem)
+            return
+        cond = self._hf_cond if self._hf_cond_fresh() else None
+
+        def work():
+            try:
+                c = cond or spacewx.get_conditions()
+                thunder = spacewx.thunderstorms_around([home] + [(t.lat, t.lon) for t in targets])
+                # Flares last minutes to hours: a net time ahead assumes a quiet sun.
+                xray = c.xray_flux if when is None else 0.0
+                iono = hfprop.Ionosphere(c.model_ssn, c.kp, xray, c.ionosondes, thunder=thunder)
+                margin = hfprop.station_margin(mode, self._HF_WATTS)
+                res = hf_planner.evaluate(iono, home, targets, list(channels.values()), margin,
+                                          when or iono.now)
+                self._prop_out = (c, res, thunder, None)
+            except Exception as e:
+                self._prop_out = (None, None, None, e)
+
+        self._prop_busy, self._prop_out = True, None
+        self._prop_note.set('Working out the expected propagation...')
+        self._prop_ctx = (call, mode, len(targets), channels, when, past, cond is None)
+        threading.Thread(target=work, daemon=True).start()
+        self.after(200, self._prop_poll)
+
+    def _prop_poll(self):
+        if self._prop_out is None:
+            self.after(200, self._prop_poll)
+            return
+        c, res, thunder, err = self._prop_out
+        self._prop_busy = False
+        call, mode, n, channels, when, past, fetched = self._prop_ctx
+        if c is not None and fetched:
+            self._hf_cond, self._hf_cond_at = c, time.time()
+        if self._prop_pending:
+            self._prop_pending = False
+            self._prop_update()
+            return
+        if err:
+            self._prop_show(f'Could not work out the expected propagation: {err}')
+            return
+        by_name = {x.channel.name: x for x in res.ranking}
+        texts = {}
+        for k, ch in channels.items():
+            x = by_name[ch.name]
+            r = hfprop.rating(x.reliability)
+            why = ''
+            if x.reliability < 0.35:
+                why = '  too high' if x.muf_ratio > 0.85 else '  too low'
+            texts[k] = (f'{x.reliability * 100:.0f}%  {r}  ({x.covered}/{n} members){why}',
+                        self._PROP_COLORS.get(r, 'black'))
+        t = res.when
+        local = t.astimezone()
+        if when is None:
+            head = (f'Net time has passed, so these are current conditions ' if past else
+                    'Current conditions ') + f'({local:%H%M} local, {t:%H%M}Z).'
+        else:
+            head = f'Expected for the net: {local:%Y-%m-%d %H%M} local ({t:%H%M}Z).'
+        sfi = f'SFI {c.sfi:.0f}, ' if c.sfi is not None else ''
+        xray = f', X-ray {c.xray_class}' if when is None else ', no flares assumed'
+        kp = f'Kp {c.kp:.1f}' if c.kp is not None else 'Kp n/a'
+        notes = []
+        ahead = (t - datetime.now(timezone.utc)).total_seconds() / 3600
+        if ahead > 6:
+            notes.append('More than 6 hours ahead: the ionosonde readings no longer count, so '
+                         'this is the model for the season and solar flux.')
+        if ahead > 72:
+            notes.append('Space weather can change a lot before then; check again closer to '
+                         'the net.')
+        if c.errors:
+            notes.append('Offline: using the last data downloaded.')
+        notes.insert(0,
+            f'{head}  Net of {n} members within {self._HF_NET_RADIUS_KM} km of {call}, '
+            f'{mode.split(" (")[0]} {self._HF_WATTS} W.  Solar: {sfi}{kp}{xray}.  '
+            f'Atmospherics: {self._hf_atmospherics(res, thunder, n)}.  % = average chance of '
+            f'working each member; (n/N) = members at 50% or better.')
+        self._prop_show('  '.join(notes), texts)
 
     def _freq_keyrelease(self, combo, var):
         """Filter the combobox dropdown list as the user types."""

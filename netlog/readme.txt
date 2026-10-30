@@ -194,8 +194,16 @@ code letter: A, B, C ...), so one band fading does not take out all three.
   - Worked out from the NCS callsign's latitude/longitude in Members (the
     Station Callsign if no NCS is entered) to every member with a position
     within 2500 km, leaving out OTHER DISTRICTS.
-  - Uses live solar, geomagnetic and ionosonde data from NOAA SWPC and
-    KC2G (internet needed; offline it uses the last data downloaded).
+  - Based on both solar activity and atmospherics:
+      solar      - live solar flux, sunspot number, Kp, X-ray flares and
+                   ionosonde readings (NOAA SWPC and KC2G);
+      atmospheric - static (atmospheric noise): louder at night, in summer
+                   and in the south, and much louder near thunderstorms;
+                   where thunderstorms are comes from Open-Meteo.com
+                   (weather data CC BY 4.0), refreshed hourly.
+    Static hurts the lower frequencies most, so storms and night-time static
+    push the choice upward. Internet needed; offline it uses the last data
+    downloaded.
     Updates when the NCS or net name changes, every 15 minutes, and on
     Refresh. Digital nets are scored for digital modes, others for SSB;
     100 W is assumed.
@@ -206,6 +214,32 @@ code letter: A, B, C ...), so one band fading does not take out all three.
   - Needs hfprop.py, spacewx.py and planner.py in the same folder as
     netlog_gui.py; without them the line says so and the rest of the
     program works as before.
+
+
+EXPECTED PROPAGATION  (Session tab)
+-----------------------------------
+To the right of the Primary, 1st Alt and 2nd Alt frequencies, the Session
+tab shows the propagation expected on each one, for example
+    88%  Excellent  (80/80 members)
+    13%  Closed  (5/80 members)  too high
+  - % is the average chance of working each net member on that frequency;
+    (n/N) is how many members are at 50% or better. "too high" means the
+    frequency is near or above the MUF; "too low" means absorption and
+    static are the problem. Green = Good or better, orange = Fair,
+    red = Poor or Closed.
+  - It is worked out once all three frequencies are filled in, and again
+    whenever one of them, the Net Date, the Start Time, the NCS or the net
+    name changes.
+  - It is for the date and time of the net: Net Date (YYYY-MM-DD) and Start
+    Time (HHMM, local time). If the net time has already passed (more than
+    an hour ago), current conditions are shown instead, and the note says so.
+  - Tick "Check current expected propagation conditions" to see the
+    conditions right now for the frequencies entered, whatever the net time.
+  - Same net, power, solar and atmospheric data as Best HF Now. For a net
+    time ahead, flares are not assumed; more than 6 hours ahead the
+    ionosonde readings no longer count, and more than about 24 hours ahead
+    the thunderstorm forecast runs out, so static comes from the season and
+    time of day only. The note on the right says which applies.
 
 
 PACKAGE VERSIONS TESTED

@@ -30,24 +30,31 @@ Best-HF-Freq estimates, for every channel in your list, the chance that a contac
    NOAA SWPC: solar flux (SFI), planetary K index, GOES X-ray flux, NOAA R/S/G scales.
    KC2G (prop.kc2g.com): the effective sunspot number fitted to ionosonde data, and the latest
    foF2 readings from GIRO/NOAA ionosondes (readings older than 90 minutes are ignored).
+   Open-Meteo (open-meteo.com): thunderstorm areas, for atmospheric static.
 
 2. Ionosphere
    foF2 (the highest frequency the F2 layer returns straight up) comes from a model driven by the
    sunspot number and the sun's angle, corrected by nearby ionosondes. Storms (Kp 5 or more)
    lower it.
 
-3. Path
+3. Atmospherics
+   Static from lightning (atmospheric noise) is added at both ends of every path. It is
+   loudest at night, in summer and at low latitudes, and much louder within about 250 km of a
+   thunderstorm. It hurts the low frequencies most, so it pushes the choice upward. Where the
+   thunderstorms are, now and for the next 24 hours, comes from Open-Meteo, refreshed hourly.
+
+4. Path
    Each path is split into hops. The MUF (maximum usable frequency) is foF2 times the secant of
    the angle the signal meets the layer, at the worst reflection point. The FOT (optimum working
    frequency) is the frequency below the MUF on 90% of days. NVIS paths reflect almost straight
    up, so their MUF is close to foF2: when foF2 drops at night, the low channels take over.
 
-4. Losses and LUF
+5. Losses and LUF
    D-layer absorption (strongest at midday and at low frequencies, more during X-ray flares),
-   spreading, extra ground reflections and noise. The LUF (lowest usable frequency) is where
+   spreading, extra ground reflections, man-made noise and atmospheric static. The LUF (lowest usable frequency) is where
    these losses use up the station's margin, set by mode, power and antenna gain.
 
-5. Reliability
+6. Reliability
    Chance the channel is below the day's MUF x chance the signal clears its losses. Net mode
    averages over every NetLog member within the distance limit and counts how many are covered
    (50% or better).
@@ -108,6 +115,21 @@ def conditions_text(c):
     return lines
 
 
+def static_text(plan):
+    r = plan.now
+    near = planner.storms_near(r)
+    if plan.thunder is None:
+        src = "thunderstorm data unavailable: season and time of day only"
+    elif near:
+        src = (f"thunderstorms near {near} of {len(r.paths)} paths" if len(r.paths) > 1
+               else "thunderstorm nearby")
+    else:
+        src = "no thunderstorms nearby"
+    level = max(p.atmospheric_db for p in r.paths)
+    word = "high" if level >= 10 else "moderate" if level >= -5 else "low"
+    return f"Static {word} ({src})"
+
+
 def warnings_for(c, result):
     out = []
     if c.xray_flux and c.xray_flux >= 1e-5:
@@ -116,6 +138,8 @@ def warnings_for(c, result):
     if c.kp is not None and c.kp >= 5:
         out.append(f"Geomagnetic storm (Kp {c.kp:.1f}): MUFs are lower and less predictable, "
                    "especially on northern paths.")
+    if planner.storms_near(result):
+        out.append("Thunderstorm static near the path: the low frequencies will be noisy.")
     if result.best.reliability < 0.35:
         out.append("No channel in the list is likely to work right now on this path.")
     elif len(result.paths) == 1:
@@ -150,10 +174,10 @@ def run_cli(args):
     for e in c.errors:
         print("warning:", e, file=sys.stderr)
     members = load_members(s) if s["path_mode"] in ("net", "station") else []
-    plan = planner.build_plan(s, c, members)
+    plan = planner.build_plan(s, c, members, fetch_thunder=True)
     r = plan.now
-    print(" | ".join(conditions_text(c)))
-    print(f"From {s['location']}  {s['mode']}  {s['watts']} W  margin {r.margin:.0f} dB")
+    print(" | ".join(conditions_text(c) + [static_text(plan)]))
+    print(f"From {s['location']}  {s['mode']}  {float(s['watts']):g} W  margin {r.margin:.0f} dB")
     if len(r.paths) == 1:
         p = r.paths[0]
         print(f"Path {r.targets[0].label}: {p.distance:.0f} km, {p.hops} hop(s), "
@@ -235,7 +259,8 @@ def run_gui():
             h.add_command(label="Disclaimer", command=lambda: disclaimer.show(self.root, APP))
             h.add_command(label="About", command=lambda: messagebox.showinfo(
                 "About", f"{APP} {VERSION}\n\nCopyright (c) 2026 N. Tesla, Inc. All rights reserved.\n\n"
-                "Data: NOAA Space Weather Prediction Center; KC2G / GIRO ionosonde network.",
+                "Data: NOAA Space Weather Prediction Center; KC2G / GIRO ionosonde network; "
+                "weather data by Open-Meteo.com (CC BY 4.0).",
                 parent=self.root))
             m.add_cascade(label="Help", menu=h)
             self.root.config(menu=m)
@@ -249,8 +274,10 @@ def run_gui():
                 lab = ttk.Label(bar, text="...", width=26 if i == 1 else 18)
                 lab.grid(row=0, column=i, sticky="w", padx=(0, 10))
                 self.cond_labels.append(lab)
+            self.static_label = ttk.Label(bar, text="")
+            self.static_label.grid(row=1, column=0, columnspan=3, sticky="w")
             self.data_age = ttk.Label(bar, text="", foreground="#555")
-            self.data_age.grid(row=1, column=0, columnspan=5, sticky="w")
+            self.data_age.grid(row=1, column=3, columnspan=3, sticky="w")
             ttk.Button(bar, text="Refresh", command=self.refresh).grid(row=0, column=6, rowspan=2, padx=(10, 0))
             bar.columnconfigure(5, weight=1)
 
@@ -341,8 +368,8 @@ def run_gui():
             hours = ttk.Frame(nb, padding=8)
             nb.add(hours, text="Next 24 hours")
             ttk.Label(hours, text="Reliability by hour. The outlined cell is the best channel for that hour. "
-                      "Forecast hours assume a quiet sun (no flares); the ionosonde correction fades over "
-                      "about 6 hours.", wraplength=820, foreground="#555").pack(anchor="w")
+                      "Forecast hours assume a quiet sun (no flares) and use the "
+                      "thunderstorm forecast for static; the ionosonde correction fades over about 6 hours.", wraplength=820, foreground="#555").pack(anchor="w")
             frame = ttk.Frame(hours)
             frame.pack(fill="both", expand=True, pady=(6, 0))
             self.canvas = tk.Canvas(frame, background="white", highlightthickness=0)
@@ -516,7 +543,8 @@ def run_gui():
             self.busy = True
             self.status.set("Calculating...")
             c, members = self.conditions, list(self.members)
-            self._run_bg(lambda: (s, planner.build_plan(s, c, members)), self._got_plan)
+            self._run_bg(lambda: (s, planner.build_plan(s, c, members, fetch_thunder=True)),
+                         self._got_plan)
 
         def _got_plan(self, out, err):
             self.busy = False
@@ -531,6 +559,7 @@ def run_gui():
             self.s.update(s)
             save_settings(self.s)
             self.plan = plan
+            self.static_label.config(text=static_text(plan))
             self._show_now()
             self._show_hours()
             self._show_stations()

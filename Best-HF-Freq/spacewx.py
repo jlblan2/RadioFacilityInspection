@@ -3,8 +3,11 @@
 Sources (all free, no key):
 - NOAA SWPC: 10.7 cm solar flux, planetary K index, GOES X-ray flux, NOAA R/S/G scales
 - KC2G (prop.kc2g.com): effective sunspot number and the latest GIRO/NOAA ionosonde readings
+- Open-Meteo (open-meteo.com): where thunderstorms are now and over the next 24 hours, for
+  atmospheric noise (static). Weather data by Open-Meteo.com, CC BY 4.0.
 """
 import json
+import math
 import os
 import ssl
 import time
@@ -12,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from hfprop import Ionosonde, sfi_to_ssn, xray_class
+from hfprop import Ionosonde, Thunderstorms, sfi_to_ssn, xray_class
 
 APP = "Best-HF-Freq"
 USER_AGENT = f"{APP}/1.0 (amateur and auxiliary HF frequency planning)"
@@ -24,6 +27,10 @@ FEEDS = {
     "essn": "https://prop.kc2g.com/api/essn.json",
     "stations": "https://prop.kc2g.com/api/stations.json",
 }
+THUNDER_URL = "https://api.open-meteo.com/v1/forecast"
+THUNDER_CODES = {95, 96, 99}     # WMO weather codes: thunderstorm (with or without hail)
+THUNDER_MAX_POINTS = 120         # grid points per request; Open-Meteo counts each one
+THUNDER_TTL = 3600               # the forecast is hourly, so fetch at most once an hour
 MAX_IONOSONDE_AGE = timedelta(minutes=90)
 MIN_CONFIDENCE = 25          # KC2G autoscaling confidence score, 0-100 (negative = manually scaled)
 
@@ -43,11 +50,11 @@ def _ssl_context():
         return ssl.create_default_context()
 
 
-def fetch_json(name, timeout=20):
+def fetch_json(name, timeout=20, url=None):
     """(data, fetched_at_epoch, error). Falls back to the cached copy if the fetch fails."""
     cache = os.path.join(data_dir(), "cache", f"{name}.json")
     try:
-        req = urllib.request.Request(FEEDS[name], headers={"User-Agent": USER_AGENT})
+        req = urllib.request.Request(url or FEEDS[name], headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
             raw = r.read()
         data = json.loads(raw)
@@ -165,3 +172,62 @@ def get_conditions(now=None):
     c.ionosondes = parse_ionosondes(load("stations"), now)
     c.oldest_data = min(times) if times else None
     return c
+
+
+_thunder_memo = {}   # bbox -> (fetched_epoch, Thunderstorms)
+
+
+def thunder_grid(lat0, lat1, lon0, lon1):
+    """Grid points covering the box, spaced at least 2 degrees, at most THUNDER_MAX_POINTS."""
+    lat0, lat1 = max(lat0, -70.0), min(lat1, 70.0)
+    step = 2.0
+    while True:
+        lats = [lat0 + i * step for i in range(int((lat1 - lat0) / step) + 1)]
+        lons = [lon0 + i * step for i in range(int((lon1 - lon0) / step) + 1)]
+        if len(lats) * len(lons) <= THUNDER_MAX_POINTS:
+            return [(round(a, 2), round((b + 180) % 360 - 180, 2)) for a in lats for b in lons]
+        step *= 1.25
+
+
+def parse_thunder(data):
+    out = []
+    for loc in data if isinstance(data, list) else [data]:
+        try:
+            times = loc["hourly"]["time"]
+            codes = loc["hourly"]["weather_code"]
+            hours = {int(_utc(t).timestamp()): (c in THUNDER_CODES) for t, c in zip(times, codes)}
+            out.append((float(loc["latitude"]), float(loc["longitude"]), hours))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def get_thunderstorms(lat0, lat1, lon0, lon1):
+    """Thunderstorm areas (now and the next 24 h) in and around the box, as Thunderstorms;
+    None if neither the network nor the cache has them."""
+    key = tuple(round(v) for v in (lat0, lat1, lon0, lon1))
+    hit = _thunder_memo.get(key)
+    if hit and time.time() - hit[0] < THUNDER_TTL:
+        return hit[1]
+    pts = thunder_grid(lat0, lat1, lon0, lon1)
+    url = (f"{THUNDER_URL}?latitude={','.join(str(a) for a, _ in pts)}"
+           f"&longitude={','.join(str(b) for _, b in pts)}"
+           "&hourly=weather_code&past_hours=1&forecast_hours=26&timezone=UTC")
+    data, at, err = fetch_json("thunder", url=url, timeout=30)
+    points = parse_thunder(data) if data else []
+    if not points:
+        return None
+    t = Thunderstorms(points, "Open-Meteo" + (" (cached)" if err else ""))
+    if not err:
+        _thunder_memo[key] = (time.time(), t)
+    return t
+
+
+def thunderstorms_around(points, pad_km=700):
+    """Thunderstorms for the area holding all the (lat, lon) points, plus a margin."""
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    pad_lat = pad_km / 111.0
+    pad_lon = pad_km / (111.0 * max(0.2, math.cos(math.radians(sum(lats) / len(lats)))))
+    return get_thunderstorms(min(lats) - pad_lat, max(lats) + pad_lat,
+                             min(lons) - pad_lon, max(lons) + pad_lon)

@@ -10,6 +10,9 @@ engineering a circuit:
   worst reflection point, or the E-layer MUF if that is higher on a short path.
 - Absorption follows the shape of the CCIR/ITU D-layer formula; solar-flare absorption
   follows NOAA's D-RAP rule (highest affected frequency = 10 log10(X-ray flux) + 65 MHz).
+- Atmospheric noise (static from lightning) at both ends of the path: louder at night,
+  in summer, at low latitudes and near thunderstorms, and steepest at low frequencies
+  (shaped after ITU-R P.372). It adds to a fixed man-made noise floor.
 - A frequency's reliability = P(frequency below the day-to-day MUF) x P(signal clears
   absorption, spreading and noise with the station's margin).
 """
@@ -208,11 +211,12 @@ class Ionosonde:
 class Ionosphere:
     """Space-weather inputs plus ionosonde corrections, for a given 'now'."""
 
-    def __init__(self, ssn, kp=0.0, xray_flux=0.0, ionosondes=(), now=None):
+    def __init__(self, ssn, kp=0.0, xray_flux=0.0, ionosondes=(), now=None, thunder=None):
         self.ssn = ssn
         self.kp = kp or 0.0
         self.xray_flux = xray_flux or 0.0
         self.now = now or datetime.now(timezone.utc)
+        self.thunder = thunder          # Thunderstorms, or None for climatology only
         self.ionosondes = []
         for s in ionosondes:
             m = model_fof2(s.lat, s.lon, s.time, ssn, self.kp)
@@ -257,6 +261,34 @@ class Ionosphere:
         return model_fof2(lat, lon, when, self.ssn, self.kp) * k, hm, near
 
 
+class Thunderstorms:
+    """Where thunderstorms are, hour by hour: [(lat, lon, {hour_start_epoch: bool})]."""
+
+    def __init__(self, points, source=""):
+        self.points = points
+        self.source = source
+
+    def covers(self, when):
+        key = int(when.timestamp()) // 3600 * 3600
+        return any(key in hours for _, _, hours in self.points)
+
+    def nearest_km(self, lat, lon, when):
+        """Distance to the nearest thunderstorm within STORM_FAR_KM in that hour; None if
+        there is none, or the hour is outside the data."""
+        key = int(when.timestamp()) // 3600 * 3600
+        best = None
+        for plat, plon, hours in self.points:
+            if hours.get(key):
+                d = distance_km(lat, lon, plat, plon)
+                if d < STORM_FAR_KM and (best is None or d < best):
+                    best = d
+        return best
+
+    def active(self, when):
+        key = int(when.timestamp()) // 3600 * 3600
+        return [(la, lo) for la, lo, hours in self.points if hours.get(key)]
+
+
 # ── path geometry ─────────────────────────────────────────────────────────────
 
 def _theta(hop_km):
@@ -293,9 +325,42 @@ def normal_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
 
-def noise_db(f):
-    """Extra atmospheric and man-made noise below 10 MHz, relative to 10 MHz."""
-    return max(0.0, 18 * math.log10(10 / f))
+STORM_NEAR_KM = 250                # thunderstorm static is loud on every low band
+STORM_FAR_KM = 800                 # still heard, mostly at night
+QUIET = -99.0                      # no atmospheric noise worth counting
+
+
+def atmospheric_level(lat, lon, when, storm_km=None):
+    """Atmospheric noise at 10 MHz, in dB over the man-made noise floor.
+
+    By day the D layer absorbs static from distant storms; at night it travels far, so
+    the level rises. Summer and low latitudes have more thunderstorms. A storm within
+    STORM_NEAR_KM dominates everything."""
+    chi = solar_zenith(lat, lon, when)
+    night = min(max((chi - 85) / 15, 0.0), 1.0)          # 0 = day, 1 = night, ramps at dusk
+    level = -20 + 18 * night
+    north_summer = 5 <= when.month <= 9
+    if (lat >= 0) == north_summer:
+        level += 4
+    if abs(lat) < 30:
+        level += 3
+    if storm_km is not None:
+        if storm_km < STORM_NEAR_KM:
+            storm = 15.0
+        elif storm_km < STORM_FAR_KM:
+            storm = 4 + 4 * night
+        else:
+            storm = QUIET
+        level = 10 * math.log10(10 ** (level / 10) + 10 ** (storm / 10))
+    return level
+
+
+def noise_db(f, atmospheric=QUIET):
+    """Noise relative to the man-made floor at 10 MHz: man-made noise rises 18 dB per decade
+    below 10 MHz, atmospheric noise about 35 dB per decade."""
+    manmade = max(0.0, 18 * math.log10(10 / f))
+    atmos = atmospheric + 35 * math.log10(10 / f)
+    return 10 * math.log10(10 ** (manmade / 10) + 10 ** (atmos / 10))
 
 
 @dataclass
@@ -312,6 +377,8 @@ class Path:
     spread_db: float = 0.0     # spreading over a 100 km path, scaled down for antenna gain at low angles
     ground_db: float = 0.0
     nearest_ionosonde: float = None
+    atmospheric_db: float = QUIET   # noisier end of the path (see atmospheric_level)
+    storm_km: float = None          # nearest thunderstorm to either end, if any is known
 
     @property
     def fot(self):
@@ -323,7 +390,7 @@ class Path:
         for haf, sec in self.flares:
             if haf > 0:
                 a += (haf / f) ** 1.5 * sec
-        return a + self.spread_db + self.ground_db + noise_db(f)
+        return a + self.spread_db + self.ground_db + noise_db(f, self.atmospheric_db)
 
     def reliability(self, f, margin_db):
         p_muf = normal_cdf(math.log(self.muf / f) / self.sigma)
@@ -355,6 +422,12 @@ def analyze_path(iono, lat1, lon1, lat2, lon2, when):
     near = [s[2] for s in samples if s[2] is not None]
     nearest = max(near) if near else None   # the worst-served reflection point
 
+    ends_storm = [iono.thunder.nearest_km(lat, lon, when) if iono.thunder else None
+                  for lat, lon in ((lat1, lon1), (lat2, lon2))]
+    known = [d for d in ends_storm if d is not None]
+    atmospheric = max(atmospheric_level(lat, lon, when, d)
+                      for (lat, lon), d in zip(((lat1, lon1), (lat2, lon2)), ends_storm))
+
     e_muf = 0.0
     if elevation(dist, E_LAYER_KM) >= MIN_ELEVATION:
         lat, lon = intermediate_point(lat1, lon1, lat2, lon2, 0.5)
@@ -382,6 +455,8 @@ def analyze_path(iono, lat1, lon1, lat2, lon2, when):
         spread_db=10 * math.log10(hops * slant_km(hop, hm) / 100),
         ground_db=2.0 * (hops - 1),
         nearest_ionosonde=nearest,
+        atmospheric_db=atmospheric,
+        storm_km=min(known) if known else None,
     )
 
 

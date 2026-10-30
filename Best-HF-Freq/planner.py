@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 import hfprop as hp
+import spacewx
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -183,19 +184,31 @@ def evaluate(iono, home, targets, channels, margin, when):
 class Plan:
     now: Result
     hourly: list = field(default_factory=list)   # Result per hour for the next 24 h
+    thunder: object = None                       # hp.Thunderstorms, or None
 
 
-def build_plan(settings, conditions, members=None, now=None, hours=24):
+def storms_near(result):
+    """How many of the result's paths have a thunderstorm close to either end."""
+    return sum(p.storm_km is not None and p.storm_km < hp.STORM_NEAR_KM for p in result.paths)
+
+
+def build_plan(settings, conditions, members=None, now=None, hours=24, thunder=None,
+               fetch_thunder=False):
+    """fetch_thunder downloads thunderstorm areas for the atmospheric-noise part; without
+    them (or a thunder argument) static comes from season, time of day and latitude only."""
     home = hp.parse_location(settings["location"])
     channels = load_channels(settings)
     targets = resolve_targets(settings, home, members)
     margin = hp.station_margin(settings["mode"], float(settings["watts"]), float(settings["gain_dbi"]))
+    if thunder is None and fetch_thunder:
+        thunder = spacewx.thunderstorms_around([home] + [(t.lat, t.lon) for t in targets])
     iono = hp.Ionosphere(conditions.model_ssn, conditions.kp, conditions.xray_flux,
-                         conditions.ionosondes, now)
-    plan = Plan(evaluate(iono, home, targets, channels, margin, iono.now))
+                         conditions.ionosondes, now, thunder)
+    plan = Plan(evaluate(iono, home, targets, channels, margin, iono.now), thunder=thunder)
     start = iono.now.replace(minute=0, second=0, microsecond=0)
     # Flares last minutes to hours: the forecast hours assume a quiet sun.
-    quiet = hp.Ionosphere(conditions.model_ssn, conditions.kp, 0.0, conditions.ionosondes, iono.now)
+    quiet = hp.Ionosphere(conditions.model_ssn, conditions.kp, 0.0, conditions.ionosondes, iono.now,
+                          thunder)
     for h in range(1, hours + 1):
         t = start + timedelta(hours=h)
         plan.hourly.append(evaluate(quiet, home, targets, channels, margin, t))

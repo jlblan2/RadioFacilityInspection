@@ -1,5 +1,6 @@
 """Tests for Best-HF-Freq. Run:  python -m unittest -v test_best_hf"""
 import json
+import math
 import os
 import sqlite3
 import tempfile
@@ -108,6 +109,40 @@ class Ionosphere(unittest.TestCase):
         far = hp.Ionosonde("far", 60.0, 20.0, 20.0, NOON_FL)
         f2, _, _ = hp.Ionosphere(80, ionosondes=[far], now=NOON_FL).fof2(*mid, NOON_FL)
         self.assertAlmostEqual(f2, model, places=6)
+
+    def test_atmospheric_noise(self):
+        day = hp.atmospheric_level(*TAMPA, NOON_FL)
+        night = hp.atmospheric_level(*TAMPA, MIDNIGHT_FL)
+        self.assertGreater(night, day + 10)
+        storm = hp.atmospheric_level(*TAMPA, NOON_FL, storm_km=100)
+        self.assertGreater(storm, night)
+        winter = hp.atmospheric_level(*TAMPA, MIDNIGHT_FL.replace(month=1))
+        self.assertLess(winter, night)
+        # Static hurts low frequencies far more than high ones.
+        self.assertGreater(hp.noise_db(3.5, storm) - hp.noise_db(3.5), 15)
+        self.assertLess(hp.noise_db(21, storm) - hp.noise_db(21), 6)
+        self.assertAlmostEqual(hp.noise_db(5.0), 18 * math.log10(2), delta=0.01)
+
+    def test_thunderstorms_push_the_choice_up(self):
+        lat, lon = hp.destination(*TAMPA, 0, 200)
+        hour = int(NOON_FL.timestamp()) // 3600 * 3600
+        storms = hp.Thunderstorms([(TAMPA[0] + 0.5, TAMPA[1], {hour: True}),
+                                   (40.0, -75.0, {hour: True})])
+        self.assertAlmostEqual(storms.nearest_km(*TAMPA, NOON_FL), 55.6, delta=1)
+        self.assertIsNone(storms.nearest_km(10.0, -30.0, NOON_FL))
+        self.assertIsNone(storms.nearest_km(*TAMPA, NOON_FL + timedelta(hours=3)))
+        quiet = hp.analyze_path(hp.Ionosphere(80, now=NOON_FL), *TAMPA, lat, lon, NOON_FL)
+        noisy = hp.analyze_path(hp.Ionosphere(80, now=NOON_FL, thunder=storms), *TAMPA, lat, lon, NOON_FL)
+        self.assertLess(noisy.storm_km, hp.STORM_NEAR_KM)
+        self.assertGreater(noisy.loss_db(3.5), quiet.loss_db(3.5) + 15)
+        chans = [hp.Channel(str(f), f) for f in (3.5, 5.3, 7.2)]
+        m = hp.station_margin("SSB voice")
+        q = {r.channel.mhz: r.reliability for r in hp.rank_channels([quiet], chans, m)}
+        n = {r.channel.mhz: r.reliability for r in hp.rank_channels([noisy], chans, m)}
+        self.assertLess(n[3.5], q[3.5])
+        # Static costs the low band more than the high one.
+        self.assertGreater(noisy.loss_db(3.5) - quiet.loss_db(3.5),
+                           noisy.loss_db(7.2) - quiet.loss_db(7.2) + 3)
 
     def test_rank_prefers_higher_frequency_within_tie_band(self):
         io = hp.Ionosphere(80, now=MIDNIGHT_FL)
@@ -245,6 +280,40 @@ class SpaceWeather(unittest.TestCase):
                 c = spacewx.get_conditions()
             self.assertIsNone(c.sfi)
             self.assertEqual(c.model_ssn, 50.0)
+
+    def test_thunderstorms(self):
+        grid = spacewx.thunder_grid(15, 36, -90, -60)
+        self.assertLessEqual(len(grid), spacewx.THUNDER_MAX_POINTS)
+        self.assertEqual(grid[0], (15.0, -90.0))
+        wide = spacewx.thunder_grid(-10, 60, -120, 20)
+        self.assertLessEqual(len(wide), spacewx.THUNDER_MAX_POINTS)
+        sample = [
+            {"latitude": 27.9, "longitude": -82.5,
+             "hourly": {"time": ["2026-06-21T17:00", "2026-06-21T18:00"], "weather_code": [95, 3]}},
+            {"latitude": 30.0, "longitude": -85.0,
+             "hourly": {"time": ["2026-06-21T17:00", "2026-06-21T18:00"], "weather_code": [0, 99]}},
+            {"bad": 1},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"APPDATA": tmp}):
+            spacewx._thunder_memo.clear()
+            reply = mock.MagicMock()
+            reply.__enter__.return_value.read.return_value = json.dumps(sample).encode()
+            with mock.patch("urllib.request.urlopen", return_value=reply) as op:
+                t = spacewx.thunderstorms_around([TAMPA])
+                again = spacewx.thunderstorms_around([TAMPA])
+            self.assertIs(t, again)                    # second call served from memory
+            self.assertEqual(op.call_count, 1)
+            self.assertIn("weather_code", op.call_args[0][0].full_url)
+            self.assertEqual(len(t.points), 2)
+            self.assertEqual(t.active(NOON_FL.replace(minute=0)), [(27.9, -82.5)])
+            self.assertEqual(t.active(NOON_FL.replace(hour=18, minute=10)), [(30.0, -85.0)])
+            spacewx._thunder_memo.clear()
+            with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+                cached = spacewx.thunderstorms_around([TAMPA])
+            self.assertIn("cached", cached.source)
+            spacewx._thunder_memo.clear()
+            with mock.patch.dict(os.environ, {"APPDATA": os.path.join(tmp, "none")}),                     mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+                self.assertIsNone(spacewx.thunderstorms_around([TAMPA]))
 
 
 if __name__ == "__main__":
