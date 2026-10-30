@@ -10,11 +10,23 @@ Usage:
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from datetime import datetime, date
-import os, sys, io, pathlib
+from datetime import datetime, date, timezone
+import os, sys, io, pathlib, re, threading, time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
+
+# Best-HF-Freq propagation engine: next to this file (distribution zip) or in the
+# sibling Best-HF-Freq folder. Without it the Session tab just says it is missing.
+_HF_DIR = os.path.normpath(os.path.join(BASE, '..', 'Best-HF-Freq'))
+if os.path.isdir(_HF_DIR):
+    sys.path.append(_HF_DIR)
+try:
+    import hfprop
+    import planner as hf_planner
+    import spacewx
+except ImportError:
+    hfprop = None
 
 import disclaimer
 from netlog import (
@@ -1198,7 +1210,9 @@ class SessionTab(ttk.Frame):
 
         _FREQ_KEYS = {'primary_freq', 'alt_freq_1', 'alt_freq_2'}
         _CS_KEYS   = {'ncs_callsign', 'station_callsign', 'ancs_callsign'}
-        for i, (lbl, key, wtype, vals) in enumerate(self._FIELDS, 1):
+        i = 0
+        for lbl, key, wtype, vals in self._FIELDS:
+            i += 1
             tk.Label(inner, text=lbl, font=FA, anchor='e').grid(
                 row=i, column=0, sticky='e', padx=(40, 8), pady=5)
             v = tk.StringVar()
@@ -1219,6 +1233,8 @@ class SessionTab(ttk.Frame):
                                150, lambda: self._freq_confirm(_w, _v)))
                     w.bind('<<ComboboxSelected>>',
                            lambda e, _w=w: self._freq_selected(_w))
+                elif key == 'net_name':
+                    w.bind('<<ComboboxSelected>>', lambda e: self._best_hf_update())
             else:
                 w = tk.Entry(inner, textvariable=v,
                              font=FA, bg=ENTRY_BG, width=38)
@@ -1227,8 +1243,11 @@ class SessionTab(ttk.Frame):
                 self._cs_entries[key] = w
                 w.bind('<Return>',   lambda _, _k=key: self._lookup_session_cs(_k))
                 w.bind('<FocusOut>', lambda _, _k=key: self._lookup_session_cs(_k))
+            if key == 'alt_freq_2':
+                i += 1
+                self._build_best_hf(inner, i)
 
-        n = len(self._FIELDS) + 1
+        n = i + 1
         tk.Button(inner, text='  Apply Session Settings  ', font=FB,
                   bg=HDR_BG, fg='#FFF', padx=12, pady=5,
                   command=self._apply).grid(row=n, column=0, columnspan=2, pady=20)
@@ -1244,6 +1263,197 @@ class SessionTab(ttk.Frame):
             _resolve_callsign_partial(typed, v, self)
         finally:
             self._cs_resolving = False
+        if key in ('ncs_callsign', 'station_callsign') and v.get() != self._hf_from:
+            self._best_hf_update()
+
+    # ── Best HF now (Best-HF-Freq engine) ─────────────────────────────────────
+    _HF_NET_RADIUS_KM = 2500       # members farther from the NCS are left out
+    _HF_REFRESH_MS    = 15 * 60 * 1000
+    _HF_WATTS         = 100
+
+    def _build_best_hf(self, parent, row):
+        self._hf_vars = [tk.StringVar() for _ in range(3)]
+        self._hf_note = tk.StringVar()
+        self._hf_best = []          # FREQ_DISPLAY strings, best first
+        self._hf_from = None        # callsign the last result was computed from
+        self._hf_cond = None        # spacewx.Conditions, reused for 15 minutes
+        self._hf_cond_at = 0.0
+        self._hf_busy = self._hf_pending = False
+        self._hf_out = None
+
+        tk.Label(parent, text='Best HF Now:', font=FA, anchor='e').grid(
+            row=row, column=0, sticky='ne', padx=(40, 8), pady=5)
+        box = tk.Frame(parent, bg=AUTO_BG, bd=1, relief='solid')
+        box.grid(row=row, column=1, sticky='w', padx=(0, 40), pady=5)
+        for k, v in enumerate(self._hf_vars):
+            tk.Label(box, textvariable=v, font=FB if k == 0 else FA, bg=AUTO_BG,
+                     anchor='w', width=34).grid(row=k, column=0, sticky='w', padx=6)
+        tk.Label(box, textvariable=self._hf_note, font=FS, fg='#555', bg=AUTO_BG,
+                 anchor='w', justify='left', wraplength=300).grid(
+            row=3, column=0, sticky='w', padx=6, pady=(2, 4))
+        btns = tk.Frame(box, bg=AUTO_BG)
+        btns.grid(row=0, column=1, rowspan=4, sticky='n', padx=6, pady=4)
+        self._hf_refresh_btn = tk.Button(btns, text='Refresh', font=FS, width=10,
+                                         command=lambda: self._best_hf_update(force=True))
+        self._hf_refresh_btn.pack(pady=(0, 4))
+        self._hf_use_btn = tk.Button(btns, text='Use these', font=FS, width=10,
+                                     state='disabled', command=self._best_hf_use)
+        self._hf_use_btn.pack()
+        if hfprop is None:
+            self._hf_refresh_btn.config(state='disabled')
+            self._hf_note.set('Needs the Best-HF-Freq app (hfprop.py, spacewx.py, planner.py) '
+                              'next to this program or in ..\\Best-HF-Freq.')
+        else:
+            self.after(self._HF_REFRESH_MS, self._best_hf_tick)
+
+    def _best_hf_tick(self):
+        self._best_hf_update(force=True)
+        self.after(self._HF_REFRESH_MS, self._best_hf_tick)
+
+    @staticmethod
+    def _hf_channels():
+        """The database frequency codes as Best-HF-Freq channels, named by their display string."""
+        out = []
+        for disp in FREQ_DISPLAY:
+            m = re.match(r'\s*([^:]+):\s*([\d.]+)\s*MHz', disp or '', re.I)
+            if m and 1.5 <= float(m.group(2)) <= 30:
+                out.append(hfprop.Channel(disp, float(m.group(2))))
+        return out
+
+    @staticmethod
+    def _hf_members(home, exclude):
+        """Net stations: members with a position, not in other districts, near the NCS."""
+        rows = get_db().execute(
+            'SELECT callsign, sector, Latitude, Lat_Dir, Longitude, Long_Dir FROM members '
+            'WHERE COALESCE(is_synthetic, 0) = 0 '
+            'AND Latitude IS NOT NULL AND Longitude IS NOT NULL').fetchall()
+        out = []
+        for r in rows:
+            if r['callsign'] == exclude or 'OTHER DISTRICTS' in (r['sector'] or '').upper():
+                continue
+            lat = -r['Latitude'] if r['Lat_Dir'] == 'S' else r['Latitude']
+            lon = -r['Longitude'] if r['Long_Dir'] == 'W' else r['Longitude']
+            if hfprop.distance_km(home[0], home[1], lat, lon) <= SessionTab._HF_NET_RADIUS_KM:
+                out.append(hf_planner.Target(r['callsign'], lat, lon))
+        return out
+
+    def _best_hf_update(self, force=False):
+        if hfprop is None:
+            return
+        if self._hf_busy:              # one at a time; run again when this one ends
+            self._hf_pending = True
+            return
+        # Database reads stay on this thread; only the download and the maths run in the background.
+        call = self._vars['ncs_callsign'].get().strip() or self._vars['station_callsign'].get().strip()
+        home = lookup_coords(call) if call else (None, None)
+        self._hf_from = call
+        if home[0] is None:
+            for v in self._hf_vars:
+                v.set('')
+            self._hf_best = []
+            self._hf_use_btn.config(state='disabled')
+            self._hf_note.set('Enter an NCS callsign whose member record has a latitude and '
+                              'longitude to see the best frequencies for the net.' if not call else
+                              f'{call} has no latitude/longitude in Members, so the best '
+                              'frequencies cannot be worked out.')
+            return
+        channels = self._hf_channels()
+        targets = self._hf_members(home, call)
+        if not channels or not targets:
+            self._hf_note.set('No frequencies in the database.' if not channels else
+                              f'No net members with a position within {self._HF_NET_RADIUS_KM} km of {call}.')
+            return
+        mode = ('Digital (ALE / VARA / PSK)' if 'DIGITAL' in self._vars['net_name'].get().upper()
+                else 'SSB voice')
+        refetch = force or self._hf_cond is None or time.time() - self._hf_cond_at > self._HF_REFRESH_MS / 1000
+        cond = None if refetch else self._hf_cond
+
+        def work():
+            try:
+                c = cond or spacewx.get_conditions()
+                iono = hfprop.Ionosphere(c.model_ssn, c.kp, c.xray_flux, c.ionosondes)
+                margin = hfprop.station_margin(mode, self._HF_WATTS)
+                res = hf_planner.evaluate(iono, home, targets, channels, margin, iono.now)
+                self._hf_out = (c, res, None)
+            except Exception as e:
+                self._hf_out = (None, None, e)
+
+        self._hf_busy, self._hf_out = True, None
+        self._hf_note.set('Getting space weather and working out the best frequencies...')
+        self._hf_ctx = (call, mode, len(targets), refetch)
+        threading.Thread(target=work, daemon=True).start()
+        self.after(200, self._best_hf_poll)
+
+    def _best_hf_poll(self):
+        if self._hf_out is None:
+            self.after(200, self._best_hf_poll)
+            return
+        c, res, err = self._hf_out
+        self._hf_busy = False
+        if self._hf_pending:
+            self._hf_pending = False
+            if c is not None:
+                self._hf_cond, self._hf_cond_at = c, time.time()
+            self._best_hf_update()
+            return
+        if err:
+            self._hf_note.set(f'Could not work out the best frequencies: {err}')
+            return
+        call, mode, n, refetched = self._hf_ctx
+        if refetched:
+            self._hf_cond, self._hf_cond_at = c, time.time()
+        top = self._hf_pick_bands(res.ranking)
+        self._hf_best = [x.channel.name for x in top]
+        for k, v in enumerate(self._hf_vars):
+            if k < len(top):
+                x = top[k]
+                v.set(f'{k + 1}.  {x.channel.name}    {x.reliability * 100:.0f}%  '
+                      f'{hfprop.rating(x.reliability)}')
+            else:
+                v.set('')
+        self._hf_use_btn.config(state='normal' if top else 'disabled')
+        sfi = f'SFI {c.sfi:.0f}, ' if c.sfi is not None else ''
+        kp = f'Kp {c.kp:.1f}, ' if c.kp is not None else ''
+        stale = '  (offline: using the last data downloaded)' if c.errors else ''
+        self._hf_note.set(
+            f'Net of {n} members within {self._HF_NET_RADIUS_KM} km of {call}, {mode.split(" (")[0]} '
+            f'{self._HF_WATTS} W.  {sfi}{kp}X-ray {c.xray_class}.  '
+            f'As of {datetime.now(timezone.utc):%H%M}Z.  % = average chance of working each '
+            f'member now; each pick is from a different band (code letter), and within 3% '
+            f'the higher frequency wins (less noise and absorption).{stale}')
+
+    @staticmethod
+    def _hf_band(display):
+        """Band of a frequency code: its leading letter(s), e.g. 'B4E:  4.1264 MHz' -> 'B'."""
+        m = re.match(r'\s*([A-Z]+)\d', display.upper())
+        return m.group(1) if m else display
+
+    @classmethod
+    def _hf_pick_bands(cls, ranking, n=3):
+        """Best channel, then the best from each band not used yet, so one band fading
+        does not take out the primary and both alternates. Same-band picks only fill in
+        when fewer than n bands are available."""
+        picked, bands = [], set()
+        for x in ranking:
+            if len(picked) == n:
+                break
+            band = cls._hf_band(x.channel.name)
+            if band not in bands:
+                picked.append(x)
+                bands.add(band)
+        for x in ranking:
+            if len(picked) == n:
+                break
+            if x not in picked:
+                picked.append(x)
+        return picked
+
+    def _best_hf_use(self):
+        """Put the three suggestions into Primary / 1st Alt / 2nd Alt (Apply still saves them)."""
+        for key, disp in zip(('primary_freq', 'alt_freq_1', 'alt_freq_2'), self._hf_best):
+            self._vars[key].set(disp)
+        self.app.set_status('Best HF frequencies copied to Primary / 1st Alt / 2nd Alt - '
+                            'press Apply Session Settings to keep them.')
 
     def _freq_keyrelease(self, combo, var):
         """Filter the combobox dropdown list as the user types."""
@@ -1279,6 +1489,7 @@ class SessionTab(ttk.Frame):
         s = self.app.session
         for k, v in self._vars.items():
             v.set(getattr(s, k, '') or '')
+        self._best_hf_update()
 
     def _apply(self):
         s = self.app.session

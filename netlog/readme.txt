@@ -1,5 +1,5 @@
 ========================================================================
-USCG Auxiliary District 7 — HF Contingency Net Log
+USCG Auxiliary — HF Contingency Net Log
 Python Application — Installation and Setup Guide
 ========================================================================
 
@@ -11,6 +11,11 @@ CONTENTS OF THIS PACKAGE
   net_archives_db_schema.sql  Archive database schema (reference)
   netlog_db_schema.pdf    Members database diagram (reference)
   net_archives_db_schema.pdf  Archive database diagram (reference)
+  hfprop.py               Best HF frequency engine (from the Best-HF-Freq app)
+  spacewx.py              Live space-weather data for the engine
+  planner.py              Channel and station helpers for the engine
+  disclaimer.py           First-use disclaimer
+  LICENSE                 License and disclaimer
   readme.txt              This file
 
 
@@ -179,6 +184,30 @@ formula to compute distance and bearing from coordinates stored in
 the member database instead of the Excel look-up tables.
 
 
+BEST HF NOW  (Session tab)
+--------------------------
+Under the Primary, 1st Alt and 2nd Alt frequencies, the Session tab lists
+the three frequency codes from the database most likely to work right now
+for the whole net: the best one, then the best from two other bands (the
+code letter: A, B, C ...), so one band fading does not take out all three.
+
+  - Worked out from the NCS callsign's latitude/longitude in Members (the
+    Station Callsign if no NCS is entered) to every member with a position
+    within 2500 km, leaving out OTHER DISTRICTS.
+  - Uses live solar, geomagnetic and ionosonde data from NOAA SWPC and
+    KC2G (internet needed; offline it uses the last data downloaded).
+    Updates when the NCS or net name changes, every 15 minutes, and on
+    Refresh. Digital nets are scored for digital modes, others for SSB;
+    100 W is assumed.
+  - "Use these" copies the three into Primary / 1st Alt / 2nd Alt; press
+    Apply Session Settings to keep them.
+  - The % is the average chance of working each member now. It is a
+    planning aid, not a guarantee: listen and use ALE soundings too.
+  - Needs hfprop.py, spacewx.py and planner.py in the same folder as
+    netlog_gui.py; without them the line says so and the rest of the
+    program works as before.
+
+
 PACKAGE VERSIONS TESTED
 ------------------------
   Python        3.14.x
@@ -187,7 +216,7 @@ PACKAGE VERSIONS TESTED
 
 
 ========================================================================
-USCG Auxiliary District 7 — Southeast Region
+USCG Auxiliary
 Net Control Station (NCS) Support Tool
 ========================================================================
 
