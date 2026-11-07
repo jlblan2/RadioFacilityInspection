@@ -8,7 +8,7 @@ closing/retention note, signature lines and the contact list. Letter size, 0.5 i
 import zipfile
 from xml.sax.saxutils import escape
 
-from watchdb import fmt_local, fmt_z, from_iso, tz_abbr
+from watchdb import fmt_local, fmt_z, from_iso, station_lines, tz_abbr
 
 W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' \
     'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
@@ -203,6 +203,14 @@ def watch_log_docx(db, wid, path, tz=None):
     body.append(table([[[run("_" * 38)], [run("_" * 38)]],
                        [[run("Watchstander signature", size=8)], [run("Relieved by / reviewed by", size=8)]]],
                       [half, PAGE_W - half], header_rows=0, borders=False))
+    lines = station_lines(db.watch_station(wid))
+    if lines:
+        body.append(para(run("Radio station", bold=True, size=9.5), space_before=160, space_after=40,
+                         keep_next=True))
+        sw = {"Call sign": 1800, "Address": 4200, "Lat / Long": 2600, "Contact phone": 1700}
+        widths = [sw[k] for k, _ in lines]
+        widths[-1] += PAGE_W - sum(widths)
+        body.append(table([[_lbl(k, v) for k, v in lines]], widths, header_rows=0))
     status = (f"Closed and locked {fmt_z(w['closed_utc'])}; signed: {w['signed_by']}. "
               if w["locked"] else "WATCH STILL OPEN — not signed. ")
     if w["locked"]:

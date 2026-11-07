@@ -101,28 +101,67 @@ class Dialog(tk.Toplevel):
 
 # ---------------------------------------------------------------- dialogs
 
-class OpenWatchDialog(Dialog):
+def rws_label(r):
+    s = WatchDB.watchstander_label(r)
+    if r["tco_date"]:
+        s += f" - TCO {wdb.fmt_date(r['tco_date'])}"
+    return s
+
+
+class WatchPeoplePicker:
+    """Station and watchstander choices shared by the Open-watch and Watch-details dialogs."""
+
+    def _setup_pickers(self):
+        db = self.db
+        self.stations = db.stations(active_only=True)
+        self.rws = db.watchstanders(active_only=True)
+        self.station_box = ttk.Combobox(self.body, width=40, values=[s["call_sign"] for s in self.stations])
+        if self.rws:
+            self.ws_values = {rws_label(r): ("rws", r["id"]) for r in self.rws}
+        else:  # no Radio Watch Standers yet: offer members, TCO-qualified first
+            members = db.members(active_only=True)
+            tco = {m["id"] for m in members if db.quals(m["id"]).get("TCO") == "QUALIFIED"}
+            members.sort(key=lambda m: (m["id"] not in tco, m["last_name"], m["first_name"]))
+            self.ws_values = {member_label(m) + (" - TCO" if m["id"] in tco else ""): ("member", m["id"])
+                              for m in members}
+        self.ws = ttk.Combobox(self.body, width=40, values=list(self.ws_values))
+
+    def _station_id(self):
+        cs = self.station_box.get().strip()
+        return next((s["id"] for s in self.stations if s["call_sign"] == cs), None), cs
+
+    def _watchstander(self):
+        name = self.ws.get().strip()
+        if not name:
+            raise LogError("Enter the watchstander")
+        kind, ident = self.ws_values.get(name, (None, None))
+        if kind == "rws":
+            return {"rws_id": ident, "watchstander": WatchDB.watchstander_label(self.db.watchstander(ident))}
+        if kind == "member":
+            return {"watchstander_id": ident, "watchstander": name.removesuffix(" - TCO")}
+        return {"watchstander": name}
+
+
+class OpenWatchDialog(Dialog, WatchPeoplePicker):
     def __init__(self, parent, db):
         self.db = db
         super().__init__(parent, "Open watch", "Open watch")
 
     def build(self):
         db = self.db
-        self.members = db.members(active_only=True)
-        # TCO-qualified first
-        tco = {m["id"] for m in self.members if db.quals(m["id"]).get("TCO") == "QUALIFIED"}
-        self.members.sort(key=lambda m: (m["id"] not in tco, m["last_name"], m["first_name"]))
-        self.ws = ttk.Combobox(self.body, width=40,
-                               values=[member_label(m) + (" - TCO" if m["id"] in tco else "") for m in self.members])
-        self.call = ttk.Entry(self.body, width=40)
-        self.call.insert(0, db.setting("station_call_sign"))
+        self._setup_pickers()
+        # Default station: the one used last, else the station call sign in Settings.
+        last = db.con.execute("SELECT station_call_sign FROM watches ORDER BY opened_utc DESC LIMIT 1").fetchone()
+        self.station_box.set(last[0] if last else db.setting("station_call_sign"))
         self.chan = ttk.Entry(self.body, width=40)
         self.chan.insert(0, db.setting("default_channel") + ", 16")
         self.rc = ttk.Entry(self.body, width=40)
         self.eq = ttk.Entry(self.body, width=40)
         self.eq.insert(0, "All equipment operational")
-        self.row(0, "Watchstander", self.ws, "pick, or type a name")
-        self.row(1, "Station call sign", self.call)
+        self.row(0, "Radio station", self.station_box,
+                 "from Data > Radio stations" if self.stations else "add stations in Data > Radio stations")
+        self.row(1, "Watchstander", self.ws,
+                 "from Data > Radio watch standers" if self.rws else "add them in Data > Radio watch standers")
         self.row(2, "Channels guarded", self.chan)
         f = ttk.Frame(self.body)
         self.tc = ttk.Entry(f, width=30)
@@ -139,34 +178,57 @@ class OpenWatchDialog(Dialog):
         self.tc.insert(0, f"Clock checked against time.gov at {utcnow():%H%MZ}")
 
     def apply(self):
-        name = self.ws.get().strip().removesuffix(" - TCO")
-        if not name:
-            raise LogError("Enter the watchstander")
-        wid_member = next((m["id"] for m in self.members if member_label(m) == name), None)
+        who = self._watchstander()
+        sid, cs = self._station_id()
+        if not cs:
+            raise LogError("Enter the radio station call sign")
+        if sid is None and self.stations and not messagebox.askyesno(
+                "Open watch", f"\"{cs}\" is not in the Radio stations list, so no address or position "
+                              "will print on the log.\n\nOpen the watch anyway?", parent=self):
+            return False
         return self.db.open_watch(
-            watchstander_id=wid_member, watchstander=name, channels=self.chan.get().strip(),
-            time_check=self.tc.get().strip(), radio_check=self.rc.get().strip(),
-            equipment_status=self.eq.get().strip(), station_call_sign=self.call.get().strip() or None)
+            channels=self.chan.get().strip(), time_check=self.tc.get().strip(),
+            radio_check=self.rc.get().strip(), equipment_status=self.eq.get().strip(),
+            station_call_sign=cs, station_id=sid, **who)
 
 
-class WatchInfoDialog(Dialog):
+class WatchInfoDialog(Dialog, WatchPeoplePicker):
     def __init__(self, parent, db, wid):
         self.db, self.wid = db, wid
         super().__init__(parent, "Watch details", "Save")
 
     def build(self):
         w = self.db.watch(self.wid)
+        self._setup_pickers()
+        self.station_box.set(w["station_call_sign"])
+        self.ws.set(next((k for k, v in self.ws_values.items()
+                          if (v[0] == "rws" and v[1] == w["rws_id"]) or
+                          (v[0] == "member" and v[1] == w["watchstander_id"])), w["watchstander"]))
+        self.row(0, "Radio station", self.station_box)
+        self.row(1, "Watchstander", self.ws)
         self.fields = {}
-        for r, (key, label) in enumerate([("watchstander", "Watchstander"), ("station_call_sign", "Station call sign"),
-                                          ("channels", "Channels guarded"), ("time_check", "Time check"),
+        for r, (key, label) in enumerate([("channels", "Channels guarded"), ("time_check", "Time check"),
                                           ("radio_check", "Radio check"), ("equipment_status", "Equipment status"),
-                                          ("notes", "Notes")]):
+                                          ("notes", "Notes")], 2):
             e = ttk.Entry(self.body, width=50)
             e.insert(0, w[key] or "")
             self.fields[key] = self.row(r, label, e)
 
     def apply(self):
-        self.db.update_watch(self.wid, **{k: e.get().strip() for k, e in self.fields.items()})
+        w = self.db.watch(self.wid)
+        sid, cs = self._station_id()
+        if not cs:
+            raise LogError("Enter the radio station call sign")
+        fields = {k: e.get().strip() for k, e in self.fields.items()}
+        fields.update({"rws_id": None, "watchstander_id": None})
+        fields.update(self._watchstander())
+        if sid is not None and sid != w["station_id"]:
+            self.db.set_watch_station(self.wid, sid)
+        elif sid is None:
+            fields["station_call_sign"] = cs
+            if cs != w["station_call_sign"]:
+                self.db._run("UPDATE watches SET station_id=NULL, station_info='' WHERE id=?", (self.wid,))
+        self.db.update_watch(self.wid, **fields)
         return True
 
 
@@ -576,6 +638,127 @@ class MembersWindow(tk.Toplevel):
         self.on_change()
 
 
+class RecordWindow(tk.Toplevel):
+    """List + form editor for a simple table (Radio watch standers, Radio stations)."""
+
+    def __init__(self, parent, title, fields, rows_fn, get_fn, save_fn, import_fn, note, on_change,
+                 display=None, size="1000x520"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry(size)
+        self.transient(parent)
+        self.fields, self.rows_fn, self.get_fn, self.save_fn = fields, rows_fn, get_fn, save_fn
+        self.import_fn, self.on_change, self.display = import_fn, on_change, display or {}
+        cols = [f[0] for f in fields] + ["active"]
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", selectmode="browse")
+        for k, label, w in fields:
+            self.tree.heading(k, text=label)
+            self.tree.column(k, width=w * 7)
+        self.tree.heading("active", text="Active")
+        self.tree.column("active", width=50)
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        self.tree.bind("<<TreeviewSelect>>", self._load)
+        form = ttk.Frame(self, padding=10)
+        form.pack(fill="x")
+        self.e = {}
+        per_row = 5
+        for i, (k, label, w) in enumerate(fields):
+            ttk.Label(form, text=label).grid(row=(i // per_row) * 2, column=i % per_row, sticky="w", padx=4)
+            self.e[k] = ttk.Entry(form, width=w + 6)
+            self.e[k].grid(row=(i // per_row) * 2 + 1, column=i % per_row, sticky="we", padx=4, pady=(0, 6))
+        self.active = tk.BooleanVar(value=True)
+        ttk.Checkbutton(form, text="Active", variable=self.active).grid(
+            row=((len(fields) - 1) // per_row) * 2 + 2, column=0, sticky="w", padx=4)
+        bar = ttk.Frame(self, padding=(10, 0, 10, 10))
+        bar.pack(fill="x")
+        ttk.Button(bar, text="New", command=self._new).pack(side="left")
+        ttk.Button(bar, text="Save", command=self._save).pack(side="left", padx=6)
+        ttk.Button(bar, text="Import CSV...", command=self._import).pack(side="left", padx=(20, 0))
+        ttk.Label(bar, text=note, foreground="#666").pack(side="left", padx=12)
+        ttk.Button(bar, text="Close", command=self.destroy).pack(side="right")
+        self.rid = None
+        self._fill()
+
+    def _show(self, k, row):
+        fn = self.display.get(k)
+        v = row[k]
+        return fn(v) if fn else ("" if v is None else v)
+
+    def _fill(self):
+        self.tree.delete(*self.tree.get_children())
+        for r in self.rows_fn():
+            self.tree.insert("", "end", iid=str(r["id"]),
+                             values=[self._show(f[0], r) for f in self.fields] + ["Yes" if r["active"] else "No"])
+
+    def _load(self, _e=None):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        r = self.get_fn(int(sel[0]))
+        self.rid = r["id"]
+        for k, w in self.e.items():
+            w.delete(0, "end")
+            w.insert(0, self._show(k, r))
+        self.active.set(bool(r["active"]))
+
+    def _new(self):
+        self.rid = None
+        self.tree.selection_remove(self.tree.selection())
+        for w in self.e.values():
+            w.delete(0, "end")
+        self.active.set(True)
+        self.e[self.fields[0][0]].focus_set()
+
+    def _save(self):
+        data = {k: w.get().strip() for k, w in self.e.items()}
+        data["active"] = int(self.active.get())
+        try:
+            self.rid = self.save_fn(data, self.rid)
+        except LogError as ex:
+            messagebox.showerror(self.title(), str(ex), parent=self)
+            return
+        self._fill()
+        self.tree.selection_set(str(self.rid))
+        self.on_change()
+
+    def _import(self):
+        path = filedialog.askopenfilename(parent=self, title="Import CSV",
+                                          filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            a, u = self.import_fn(path)
+        except (LogError, OSError, ValueError) as ex:
+            messagebox.showerror("Import", str(ex), parent=self)
+            return
+        messagebox.showinfo("Import", f"{a} added, {u} updated.", parent=self)
+        self._fill()
+        self.on_change()
+
+
+def watchstanders_window(parent, db, on_change):
+    return RecordWindow(
+        parent, "Radio watch standers",
+        [("last_name", "Last name", 16), ("first_name", "First name", 14), ("member_no", "Member # (7 digits)", 11),
+         ("phone", "Telephone", 14), ("tco_date", "TCO date", 11)],
+        db.watchstanders, db.watchstander, db.save_watchstander, db.import_watchstanders_csv,
+        "TCO date = date qualified as Telecommunications Operator (MM/DD/YYYY). "
+        "CSV columns: member_no, last_name, first_name, phone, tco_date.",
+        on_change, display={"tco_date": wdb.fmt_date}, size="900x480")
+
+
+def stations_window(parent, db, on_change):
+    return RecordWindow(
+        parent, "Radio stations",
+        [("call_sign", "Call sign", 18), ("street", "Street", 24), ("city", "City", 16), ("state", "State", 5),
+         ("zip", "ZIP", 8), ("latitude", "Latitude", 13), ("longitude", "Longitude", 14), ("phone", "Contact phone", 14)],
+        db.stations, db.station, db.save_station, db.import_stations_csv,
+        "Lat/Long as 30 40.09 N / 081 27.67 W, or decimal (30.6682 / -81.4612). "
+        "CSV: call_sign, street, city, state, zip, latitude, longitude, phone.",
+        on_change, display={"latitude": lambda v: wdb.fmt_coord(v, "lat"),
+                            "longitude": lambda v: wdb.fmt_coord(v, "lon")}, size="1150x480")
+
+
 class ListEditor(tk.Toplevel):
     """Ordered list of rows with a few text columns (channels, contacts)."""
 
@@ -755,6 +938,8 @@ class App:
         d = tk.Menu(m, tearoff=0)
         d.add_command(label="Vessels...", command=lambda: VesselsWindow(self.root, self.db, self.refresh))
         d.add_command(label="Members and qualifications...", command=lambda: MembersWindow(self.root, self.db, self.refresh))
+        d.add_command(label="Radio watch standers...", command=lambda: watchstanders_window(self.root, self.db, self.refresh))
+        d.add_command(label="Radio stations...", command=lambda: stations_window(self.root, self.db, self.refresh))
         d.add_command(label="Channels...", command=self.edit_channels)
         d.add_command(label="Contacts...", command=self.edit_contacts)
         d.add_separator()
@@ -1301,9 +1486,16 @@ def make_demo(path):
     for no, last, first, q in people:
         ids[last] = db.save_member({"member_no": no, "last_name": last, "first_name": first,
                                     "phone": "(904) 555-01" + no[-2:]}, q)
+    sid = db.save_station({"call_sign": "Amelia 9", "street": "100 Example Way", "city": "Fernandina Beach",
+                           "state": "FL", "zip": "32034", "latitude": "30 40.09 N", "longitude": "081 27.67 W",
+                           "phone": "(904) 555-0190"})
+    rws = db.save_watchstander({"member_no": "1000007", "last_name": "Gunwale", "first_name": "Gray",
+                                "phone": "(904) 555-0107", "tco_date": "03/15/2024"})
+    db.save_watchstander({"member_no": "1000004", "last_name": "Davit", "first_name": "Drew",
+                          "phone": "(904) 555-0104", "tco_date": "06/01/2022"})
     now = utcnow()
     opened = now - timedelta(hours=2)
-    wid = db.open_watch(watchstander_id=ids["Gunwale"], time_check=f"Clock checked against time.gov at {opened:%H%MZ}",
+    wid = db.open_watch(rws_id=rws, station_id=sid, time_check=f"Clock checked against time.gov at {opened:%H%MZ}",
                         radio_check="Loud and clear with Station Mayport Ch 83A", when=opened)
     vessels = {v["facility_no"]: v["id"] for v in db.vessels()}
     p1 = db.add_patrol(wid, vessels["1675"], ids["Anchor"], [ids["Bowline"], ids["Cleat"], ids["Davit"]],

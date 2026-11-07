@@ -278,5 +278,95 @@ class TestReportsAndImport(Base):
             db2.close()
 
 
+class TestWatchstandersAndStations(unittest.TestCase):
+    def setUp(self):
+        self.db = WatchDB(":memory:")
+        self.addCleanup(self.db.close)
+        self.sid = self.db.save_station({"call_sign": "Amelia 9", "street": "100 Example Way",
+                                         "city": "Fernandina Beach", "state": "fl", "zip": "32034",
+                                         "latitude": "30 40.09 N", "longitude": "081° 27.67' W",
+                                         "phone": "(904) 555-0190"})
+        self.rid = self.db.save_watchstander({"member_no": "1000007", "last_name": "Gunwale", "first_name": "Gray",
+                                              "phone": "555-0107", "tco_date": "3/15/2024"})
+
+    def test_tables(self):
+        s = self.db.station(self.sid)
+        self.assertEqual((s["state"], s["latitude"], s["longitude"]), ("FL", 30.668167, -81.461167))
+        self.assertEqual(self.db.watchstander(self.rid)["tco_date"], "2024-03-15")
+        with self.assertRaises(LogError):
+            self.db.save_watchstander({"member_no": "1000007", "last_name": "Dup"})
+        with self.assertRaises(LogError):
+            self.db.save_station({"call_sign": "Amelia 9"})
+        with self.assertRaises(LogError):
+            self.db.save_watchstander({"member_no": "1000008", "last_name": "X", "tco_date": "someday"})
+
+    def test_coordinates(self):
+        from watchdb import fmt_coord, parse_coord
+        self.assertEqual(parse_coord("-81.4612", "lon"), -81.4612)
+        self.assertEqual(parse_coord("30 40 5.4 N", "lat"), 30.668167)
+        self.assertEqual(fmt_coord(-81.461167, "lon"), "081°27.67'W")
+        self.assertEqual(parse_coord(fmt_coord(30.668167, "lat"), "lat"), 30.668167)
+        for bad, kind in (("95", "lat"), ("30 N", "lon"), ("abc", "lat")):
+            with self.assertRaises(LogError):
+                parse_coord(bad, kind)
+
+    def test_watch_uses_station_snapshot(self):
+        wid = self.db.open_watch(rws_id=self.rid, station_id=self.sid, when=T0)
+        w = self.db.watch(wid)
+        self.assertEqual((w["watchstander"], w["station_call_sign"]), ("Gunwale, Gray (1000007)", "Amelia 9"))
+        # Later changes to the station do not alter a watch already opened.
+        self.db.save_station({"street": "200 New St"}, self.sid)
+        self.assertEqual(self.db.watch_station(wid)["street"], "100 Example Way")
+        self.db.close_watch(wid, "GG", when=T0)
+        h = reports.watch_log_html(self.db, wid)
+        sig = h.index("Watchstander signature")
+        for s in ("Radio station", "100 Example Way, Fernandina Beach, FL 32034", "30°40.09&#x27;N", "081°27.67&#x27;W",
+                  "(904) 555-0190"):
+            self.assertGreater(h.index(s), sig)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "x.docx")
+            reports.save_watch_log(self.db, wid, p)
+            import zipfile
+            doc = zipfile.ZipFile(p).read("word/document.xml").decode("utf-8")
+        self.assertGreater(doc.index("100 Example Way"), doc.index("Watchstander signature"))
+
+    def test_watch_without_station_prints_no_block(self):
+        wid = self.db.open_watch(watchstander="Someone", station_call_sign="Other Radio")
+        self.assertNotIn("Radio station</div>", reports.watch_log_html(self.db, wid))
+
+    def test_csv_imports(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "w.csv")
+            with open(p, "w", newline="", encoding="utf-8") as f:
+                f.write("Member No,Last Name,First Name,Phone,TCO Date\n1000007,Gunwale,Gray,555,01/02/2020\n"
+                        "1000011,Hawser,Harper,556,2021-05-05\n")
+            self.assertEqual(self.db.import_watchstanders_csv(p), (1, 1))
+            self.assertEqual(self.db.watchstander(self.rid)["tco_date"], "2020-01-02")
+            p = os.path.join(d, "s.csv")
+            with open(p, "w", newline="", encoding="utf-8") as f:
+                f.write("call_sign,city,latitude,longitude\nAmelia 9,Yulee,30.6,-81.5\nAmelia 10,Yulee,,\n")
+            self.assertEqual(self.db.import_stations_csv(p), (1, 1))
+            self.assertEqual(self.db.station(self.sid)["city"], "Yulee")
+
+    def test_old_database_is_upgraded(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "old.db")
+            db = WatchDB(p)
+            wid = db.open_watch(watchstander="X", when=T0)
+            db.add_entry(wid, "COMMS", time=T0, station="Y")
+            db.close()
+            con = sqlite3.connect(p)  # make it look like a version-1 database
+            con.executescript("DROP TABLE radio_watch_standers; DROP TABLE radio_stations;"
+                              "ALTER TABLE watches DROP COLUMN station_info; ALTER TABLE watches DROP COLUMN station_id;"
+                              "ALTER TABLE watches DROP COLUMN rws_id; UPDATE meta SET value='1';")
+            con.close()
+            db = WatchDB(p)
+            self.assertEqual(len(db.entries(wid)), 1)
+            self.assertIsNone(db.watch_station(wid))
+            db.save_station({"call_sign": "Z"})
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

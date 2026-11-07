@@ -7,7 +7,18 @@ import csv
 import os
 import html
 
-from watchdb import APP, fmt_local, fmt_z, from_iso, tz_abbr
+from watchdb import APP, fmt_local, fmt_z, from_iso, station_lines, tz_abbr
+
+
+def _station_block(station):
+    """Radio station details printed under the watchstander signature."""
+    lines = station_lines(station)
+    if not lines:
+        return ""
+    width = {"Call sign": 17, "Address": 38, "Lat / Long": 29, "Contact phone": 16}
+    cells = "".join(f"<td style='width:{width.get(k, 20)}%'><span class='lbl'>{esc(k)}</span>{esc(v)}</td>"
+                    for k, v in lines)
+    return f"<div class='stn'><div class='stnh'>Radio station</div><table class='hdr'><tr>{cells}</tr></table></div>"
 
 CSS = """
 @page { size: letter; margin: 0.5in;
@@ -29,6 +40,8 @@ th { background: #e6e6e6; font-weight: bold; }
 .sig { margin-top: 18px; width: 100%; }
 .sig td { border: none; padding-top: 22px; }
 .sig span { display: inline-block; border-top: 1px solid #000; min-width: 260px; padding-top: 2px; font-size: 8.5pt; }
+.stn { margin-top: 12px; break-inside: avoid; }
+.stnh { font-weight: bold; font-size: 9.5pt; margin-bottom: 2px; }
 .contacts { columns: 2; font-size: 9pt; margin-top: 4px; }
 .contacts div { break-inside: avoid; }
 .note { font-size: 8.5pt; color: #333; margin-top: 6px; }
@@ -152,6 +165,7 @@ def watch_log_html(db, wid, tz=None):
     retain = db.retain_until(wid) if w["locked"] else None
     out.append("<table class='sig'><tr><td><span>Watchstander signature</span></td>"
                "<td><span>Relieved by / reviewed by</span></td></tr></table>")
+    out.append(_station_block(db.watch_station(wid)))
     out.append(f"<div class='note'>{status}. "
                + (f"Retain until {retain:%d %b %Y} (AOPG Vol III 3-F.3"
                   f"{'; distress traffic logged — 3 years' if db.has_distress(wid) else ''}). " if retain else "")

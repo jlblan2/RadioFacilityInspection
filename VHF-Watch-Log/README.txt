@@ -32,6 +32,20 @@ Data > Members and      Member number (7 digits), name, phone, and each qualific
                         (an AUXDATA export can be reshaped to these columns).
                         The database also has two views, "coxswains" (name, member #, phone)
                         and "crew" (name, member #, status), for anyone reading it directly.
+Data > Radio watch      The radio watch standers (table radio_watch_standers): name, member
+       standers         number, telephone and TCO date (MM/DD/YYYY). They are the choices for
+                        Watchstander when a watch is opened. Import CSV... accepts member_no,
+                        last_name, first_name, phone, tco_date.
+Data > Radio stations   The Auxiliary radio stations (table radio_stations): call sign, street,
+                        city, state, ZIP, latitude/longitude and contact phone. Lat/Long can be
+                        typed as on a chart (30 40.09 N, 081 27.67 W), with seconds, or as
+                        decimal degrees (30.6682, -81.4612); it is shown as degrees and decimal
+                        minutes. Import CSV... accepts call_sign, street, city, state, zip,
+                        latitude, longitude, phone.
+                        The station chosen for a watch is printed on the completed log (PDF,
+                        Word and printout) below the watchstander signature. Its details are
+                        copied into the watch when it is opened, so changing a station later
+                        does not change logs already kept.
 Data > Channels         Channels offered in the log (16, 22A, 83A ... are preloaded).
 Data > Contacts         The telephone list printed at the foot of the log (preloaded from the
                         current paper form: Station Mayport, Sector Jacksonville, etc.).
@@ -42,7 +56,8 @@ Data > Settings         Station call sign, default channel, ops-normal interval 
 
 A WATCH
 -------
-1. Open watch...   Watchstander, channels guarded, time check (the time.gov button opens
+1. Open watch...   Radio station and watchstander (picked from the two lists above; the
+                   station used last is offered first), channels guarded, time check (the time.gov button opens
                    the official clock; "Checked" records it), radio check, equipment status.
 2. Add patrol...   Vessel, patrol order (PO#), GAR score, coxswain, crew (any number; trainees
                    are marked automatically from their status), POB, cell #, float plan / area,
