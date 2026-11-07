@@ -7,13 +7,41 @@ guarding Auxiliary patrols. It replaces the paper "Auxiliary Radio" log: vessels
 and crew come from a database instead of being written in by hand, and the log keeps to
 the Coast Guard's log-keeping rules.
 
+It is a stand-alone program for VHF communications. It is separate from the HF Net Log
+program and does not use its files or database.
 
-RUNNING IT
+
+INSTALLING
 ----------
-Double-click run.bat. It needs Python 3.9 or newer with tkinter ("tcl/tk and IDLE" ticked
-when installing Python). No other packages and no internet connection are needed.
+1. Python 3.9 or newer is needed (free, from https://www.python.org/downloads/). When
+   installing Python tick "Add python.exe to PATH" and "tcl/tk and IDLE". No other packages
+   and no internet connection are needed by the program.
+2. If you received VHF_Watch_Log_Setup.zip: right-click it, choose "Extract All...", then
+   open the extracted "VHF Watch Log" folder. (Running install.bat from inside the zip
+   without extracting does not work.) Otherwise copy this whole "VHF Watch Log" folder to
+   the computer, or open it from a USB stick or network drive.
+   Double-click install.bat.
+   It checks Python, copies the program to
+       %LOCALAPPDATA%\Programs\VHF Watch Log
+   (your own Programs folder, so administrator rights are not needed), and puts a
+   "VHF Watch Log" shortcut on the Desktop and in the Start menu.
+   To install somewhere else:   install.bat "D:\Radio\VHF Watch Log"
+3. Start it from the shortcut. The first time it shows a disclaimer that must be accepted.
 
-The first time it starts it shows a disclaimer that must be accepted.
+Updating: run install.bat from the new version; it replaces the program files only.
+Removing: run uninstall.bat in the installed folder. It removes the program and shortcuts
+but KEEPS your logs (radio logs must be kept 1 year, 3 years with distress traffic).
+
+Your logs are never in the program folder. They are in one database file:
+    %APPDATA%\N. Tesla\VHF Watch Log\watchlog.db
+Installing, updating or uninstalling never touches it. Use File > Back up database... to
+copy it, for example before moving to a new computer (put the copy in that same place on
+the new computer, or open it with run.bat --db "path\to\copy.db").
+
+
+RUNNING IT WITHOUT INSTALLING
+-----------------------------
+Double-click run.bat in this folder.
 
 To try it with made-up boats and people (no real members) without touching your own data:
     run.bat --demo "%TEMP%\watchlog_demo.db"
@@ -127,9 +155,13 @@ Freedom of Information Act; refer any request to the Director and the FOIA coord
 
 FILES
 -----
+install.bat        installs the program and makes the shortcuts
+uninstall.bat      removes the program (keeps your logs)
+run.bat            starts the program from whatever folder it is in
 watchlog.py        the window (also --db FILE, --demo FILE)
 watchdb.py         database and log rules
 reports.py         printed log, PDF, ICS 309, 7030 CSV, contact sheet
 docx_export.py     Word (.docx) watch log, standard library only
 disclaimer.py      first-use disclaimer
 test_watchlog.py   tests:  python -m unittest test_watchlog
+make_zip.py        builds VHF_Watch_Log_Setup.zip to send to other watch standers
