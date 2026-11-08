@@ -509,19 +509,19 @@ class VesselsWindow(tk.Toplevel):
 
 
 class MembersWindow(tk.Toplevel):
-    QUAL_COLS = [("COXSWAIN", "Coxswain"), ("CREW", "Crew"), ("PWC", "PWC"), ("TCO", "TCO")]
+    QUAL_COLS = [("COXSWAIN", "Coxswain"), ("CREW", "Crew"), ("PWC", "PWC"), ("TCO", "TCO"), ("QE", "QE")]
 
     def __init__(self, parent, db, on_change):
         super().__init__(parent)
         self.db, self.on_change = db, on_change
         self.title("Members and qualifications")
-        self.geometry("980x600")
+        self.geometry("1060x600")
         self.transient(parent)
         top = ttk.Frame(self, padding=(10, 10, 10, 0))
         top.pack(fill="x")
         ttk.Label(top, text="Show:").pack(side="left")
         self.show = ttk.Combobox(top, state="readonly", width=24,
-                                 values=["All members", "Coxswains", "Crew", "Trainees", "Inactive"])
+                                 values=["All members", "Coxswains", "Crew", "QEs", "Trainees", "Inactive"])
         self.show.current(0)
         self.show.pack(side="left", padx=6)
         self.show.bind("<<ComboboxSelected>>", lambda e: self._fill())
@@ -552,7 +552,7 @@ class MembersWindow(tk.Toplevel):
             self.q[q] = ttk.Combobox(form, state="readonly", width=12, values=["", *[s.title() if s != "REYR" else s for s in QUAL_STATUS]])
             self.q[q].grid(row=3, column=i, sticky="w", padx=4)
         self.active = tk.BooleanVar(value=True)
-        ttk.Checkbutton(form, text="Active", variable=self.active).grid(row=3, column=4, sticky="w", padx=8)
+        ttk.Checkbutton(form, text="Active", variable=self.active).grid(row=3, column=len(self.QUAL_COLS), sticky="w", padx=8)
         bar = ttk.Frame(self, padding=(10, 0, 10, 10))
         bar.pack(fill="x")
         ttk.Button(bar, text="New", command=self._new).pack(side="left")
@@ -573,11 +573,13 @@ class MembersWindow(tk.Toplevel):
                 continue
             if show == "Crew" and "CREW" not in q:
                 continue
+            if show == "QEs" and "QE" not in q:
+                continue
             if show == "Trainees" and "TRAINEE" not in q.values():
                 continue
             if show == "Inactive" and m["active"]:
                 continue
-            if show in ("Coxswains", "Crew", "Trainees") and not m["active"]:
+            if show in ("Coxswains", "Crew", "QEs", "Trainees") and not m["active"]:
                 continue
             vals = [m["member_no"], m["last_name"], m["first_name"], m["phone"]]
             vals += [(q.get(k, "").title() if q.get(k) != "REYR" else "REYR") for k, _ in self.QUAL_COLS]
@@ -1478,7 +1480,7 @@ def make_demo(path):
     people = [("1000001", "Anchor", "Alex", {"COXSWAIN": "QUALIFIED", "CREW": "QUALIFIED"}),
               ("1000002", "Bowline", "Blake", {"CREW": "QUALIFIED"}),
               ("1000003", "Cleat", "Casey", {"CREW": "TRAINEE"}),
-              ("1000004", "Davit", "Drew", {"CREW": "QUALIFIED", "TCO": "QUALIFIED"}),
+              ("1000004", "Davit", "Drew", {"CREW": "QUALIFIED", "TCO": "QUALIFIED", "QE": "QUALIFIED"}),
               ("1000005", "Ensign", "Emery", {"COXSWAIN": "QUALIFIED", "CREW": "QUALIFIED"}),
               ("1000006", "Fender", "Finley", {"CREW": "QUALIFIED"}),
               ("1000007", "Gunwale", "Gray", {"TCO": "QUALIFIED"})]

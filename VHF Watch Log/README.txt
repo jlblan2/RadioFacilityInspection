@@ -54,10 +54,11 @@ Data > Vessels          Facility number, name, radio call sign, cell #, owner, t
                         facility_no, name, call_sign, cell, owner, description, mmsi,
                         inspection_expires.
 Data > Members and      Member number (7 digits), name, phone, and each qualification:
-       qualifications   Coxswain, Crew, PWC, TCO, each Qualified / Trainee / REYR, or blank if
-                        not held. One person can be both coxswain and crew. Import CSV...
-                        accepts member_no, last_name, first_name, phone, coxswain, crew, pwc, tco
-                        (an AUXDATA export can be reshaped to these columns).
+       qualifications   Coxswain, Crew, PWC, TCO, QE (Qualification Examiner), each
+                        Qualified / Trainee / REYR, or blank if not held. One person can be both
+                        coxswain and crew. "Show: QEs" lists the Qualification Examiners.
+                        Import CSV... accepts member_no, last_name, first_name, phone, coxswain,
+                        crew, pwc, tco, qe (an AUXDATA export can be reshaped to these columns).
                         The database also has two views, "coxswains" (name, member #, phone)
                         and "crew" (name, member #, status), for anyone reading it directly.
 Data > Radio watch      The radio watch standers (table radio_watch_standers): name, member

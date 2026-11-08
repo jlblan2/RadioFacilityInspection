@@ -51,6 +51,12 @@ class TestTables(Base):
         self.db.save_member({}, {"CREW": ""}, mid=self.c2)
         self.assertEqual(self.db.quals(self.c2), {})
 
+    def test_qe_qualification(self):
+        self.db.save_member({}, {"QE": "QUALIFIED"}, mid=self.cox)
+        self.assertEqual(self.db.quals(self.cox), {"COXSWAIN": "QUALIFIED", "CREW": "QUALIFIED", "QE": "QUALIFIED"})
+        self.db.save_member({}, {"QE": ""}, mid=self.cox)
+        self.assertNotIn("QE", self.db.quals(self.cox))
+
     def test_patrol_crew_and_pob(self):
         crew = self.db.patrol_crew(self.pid)
         self.assertEqual([(c["last_name"], c["role"], c["trainee"]) for c in crew],
@@ -224,11 +230,11 @@ class TestReportsAndImport(Base):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "m.csv")
             with open(p, "w", newline="", encoding="utf-8") as f:
-                f.write("Member No,Last Name,First Name,Phone,Coxswain,Crew\n"
-                        "1000002,Bowline,Blake,555,Qualified,Qualified\n"
+                f.write("Member No,Last Name,First Name,Phone,Coxswain,Crew,QE\n"
+                        "1000002,Bowline,Blake,555,Qualified,Qualified,Trainee\n"
                         "1000010,Newman,Nora,,,Trainee\n")
             self.assertEqual(self.db.import_members_csv(p), (1, 1))
-            self.assertEqual(self.db.quals(self.c1), {"COXSWAIN": "QUALIFIED", "CREW": "QUALIFIED"})
+            self.assertEqual(self.db.quals(self.c1), {"COXSWAIN": "QUALIFIED", "CREW": "QUALIFIED", "QE": "TRAINEE"})
             self.assertEqual(self.db.member_by_no("1000002")["first_name"], "Blake")
             vp = os.path.join(d, "v.csv")
             with open(vp, "w", newline="", encoding="utf-8") as f:
@@ -365,6 +371,31 @@ class TestWatchstandersAndStations(unittest.TestCase):
             self.assertEqual(len(db.entries(wid)), 1)
             self.assertIsNone(db.watch_station(wid))
             db.save_station({"call_sign": "Z"})
+            db.close()
+
+    def test_v2_database_gets_qe(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "v2.db")
+            db = WatchDB(p)
+            mid = db.save_member({"member_no": "1000001", "last_name": "Anchor"},
+                                 {"COXSWAIN": "QUALIFIED", "CREW": "TRAINEE"})
+            db.close()
+            con = sqlite3.connect(p)  # recreate the version-2 table without QE
+            con.executescript(
+                "DROP VIEW coxswains; DROP VIEW crew; ALTER TABLE qualifications RENAME TO q;"
+                "CREATE TABLE qualifications(member_id INTEGER NOT NULL REFERENCES members(id),"
+                " qual TEXT NOT NULL CHECK (qual IN ('COXSWAIN','CREW','PWC','TCO')),"
+                " status TEXT NOT NULL CHECK (status IN ('QUALIFIED','TRAINEE','REYR')),"
+                " as_of TEXT NOT NULL DEFAULT '', PRIMARY KEY(member_id, qual));"
+                "INSERT INTO qualifications SELECT * FROM q; DROP TABLE q; UPDATE meta SET value='2';")
+            con.close()
+            db = WatchDB(p)
+            self.assertEqual(db.quals(mid), {"COXSWAIN": "QUALIFIED", "CREW": "TRAINEE"})
+            db.save_member({}, {"QE": "QUALIFIED"}, mid=mid)
+            self.assertEqual(db.quals(mid)["QE"], "QUALIFIED")
+            self.assertEqual(db.con.execute("SELECT COUNT(*) FROM coxswains").fetchone()[0], 1)
+            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "3")
             db.close()
 
 

@@ -3,7 +3,7 @@
 Tables
   vessels         facility number, name, radio call sign, cell, ...
   members         member number, name, phone
-  qualifications  member x (COXSWAIN | CREW | PWC | TCO) -> QUALIFIED | TRAINEE | REYR
+  qualifications  member x (COXSWAIN | CREW | PWC | TCO | QE) -> QUALIFIED | TRAINEE | REYR
   coxswains/crew  VIEWS giving the two lists in the shape originally asked for
   channels, contacts, settings
   watches         one radio watch (opened/closed, watchstander, time check, radio check ...)
@@ -25,9 +25,9 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 APP = "VHF Watch Log"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
-QUALS = ("COXSWAIN", "CREW", "PWC", "TCO")
+QUALS = ("COXSWAIN", "CREW", "PWC", "TCO", "QE")  # QE = Qualification Examiner
 QUAL_STATUS = ("QUALIFIED", "TRAINEE", "REYR")
 
 # Entry types. CONTACT_TYPES restart the ops-normal clock for that vessel (M2000.3G ch. 5, CG Boat Communications, 8.a:
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS members(
 
 CREATE TABLE IF NOT EXISTS qualifications(
     member_id INTEGER NOT NULL REFERENCES members(id),
-    qual TEXT NOT NULL CHECK (qual IN ('COXSWAIN','CREW','PWC','TCO')),
+    qual TEXT NOT NULL CHECK (qual IN ('COXSWAIN','CREW','PWC','TCO','QE')),
     status TEXT NOT NULL CHECK (status IN ('QUALIFIED','TRAINEE','REYR')),
     as_of TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(member_id, qual));
@@ -420,6 +420,19 @@ class WatchDB:
     def _migrate(self):
         """Bring an older database up to SCHEMA_VERSION without touching logged data."""
         cols = {r["name"] for r in self.con.execute("PRAGMA table_info(watches)")}
+        qsql = self.con.execute("SELECT sql FROM sqlite_master WHERE name='qualifications'").fetchone()[0]
+        if "'QE'" not in qsql:
+            # v3 adds the QE qualification. SQLite cannot change a CHECK constraint in place,
+            # so rebuild the table (the views on it are dropped and recreated around it).
+            with self.con:
+                self.con.execute("DROP VIEW IF EXISTS coxswains")
+                self.con.execute("DROP VIEW IF EXISTS crew")
+                self.con.execute("ALTER TABLE qualifications RENAME TO qualifications_v2")
+            self.con.executescript(SCHEMA)
+            with self.con:
+                self.con.execute("INSERT INTO qualifications(member_id, qual, status, as_of) "
+                                 "SELECT member_id, qual, status, as_of FROM qualifications_v2")
+                self.con.execute("DROP TABLE qualifications_v2")
         with self.con:
             for name, decl in (("rws_id", "INTEGER REFERENCES radio_watch_standers(id)"),
                                ("station_id", "INTEGER REFERENCES radio_stations(id)"),
@@ -930,7 +943,7 @@ class WatchDB:
     # ---- CSV import
     def import_members_csv(self, path):
         """Columns (header row, any order, case-insensitive): member_no, last_name, first_name,
-        phone, coxswain, crew, pwc, tco. Qualification columns hold Qualified/Trainee/REYR or blank.
+        phone, coxswain, crew, pwc, tco, qe. Qualification columns hold Qualified/Trainee/REYR or blank.
         Existing members (same member number) are updated. Returns (added, updated)."""
         import csv
         added = updated = 0
