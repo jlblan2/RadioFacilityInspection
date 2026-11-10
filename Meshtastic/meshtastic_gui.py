@@ -37,6 +37,7 @@ import disclaimer
 import firmware as fw
 import netdiscovery
 import printing
+import settings_backup as sb
 
 FIRMWARE_CACHE_DIR = os.path.join(BASE, "firmware_cache")
 REPORT_CACHE_DIR = os.path.join(BASE, "report_cache")
@@ -378,6 +379,12 @@ class App(tk.Tk):
         self.fw_platform = None
         self.fw_path = None
         self._fw_backup_dir = None   # last folder used for a firmware backup/restore
+        # Settings backups (settings_backup.py): the radio last connected (kept after it
+        # disconnects, e.g. into bootloader mode), and the backup taken right before a
+        # firmware update, which is offered back when that radio next connects.
+        self._last_device = None
+        self._pending_restore = None
+        self._settings_busy = False
 
         self.ble_queue: "queue.Queue" = queue.Queue()
         self.printer_queue: "queue.Queue" = queue.Queue()
@@ -1284,6 +1291,24 @@ class App(tk.Tk):
         tk.Label(f, text=self.FW_WAIT_NOTICE, font=FB, fg="#B26A00", justify="left", anchor="w",
                   wraplength=900).pack(fill="x", padx=10, pady=(0, 6))
 
+        sb = tk.LabelFrame(f, text="Device Settings Backup", font=FB)
+        sb.pack(fill="x", padx=8, pady=(0, 8))
+        sb_row = tk.Frame(sb)
+        sb_row.pack(fill="x", padx=8, pady=6)
+        self.btn_backup_settings = tk.Button(sb_row, text="Back Up Settings Now", font=FA,
+                                               command=self._backup_settings_now, state="disabled")
+        self.btn_backup_settings.pack(side="left")
+        self.btn_restore_settings = tk.Button(sb_row, text="Restore Settings…", font=FA,
+                                                command=self._restore_settings_clicked, state="disabled")
+        self.btn_restore_settings.pack(side="left", padx=8)
+        tk.Button(sb_row, text="Open Folder", font=FA,
+                   command=self._open_settings_folder).pack(side="left")
+        self.settings_backup_var = tk.StringVar(
+            value="All settings are saved when you connect and right before a firmware update; after the "
+                  "update, connect and the app offers to put them back.")
+        tk.Label(sb_row, textvariable=self.settings_backup_var, font=FS, fg=DIM_FG, justify="left",
+                  anchor="w", wraplength=520).pack(side="left", padx=10, fill="x", expand=True)
+
         manual = tk.LabelFrame(f, text="Board (for boards that can't stay connected in bootloader mode)", font=FB)
         manual.pack(fill="x", padx=8, pady=(0, 8))
         tk.Label(manual,
@@ -1474,6 +1499,9 @@ class App(tk.Tk):
                 "Confirm Flash",
                 f"Copy {os.path.basename(self.fw_path)} to {drive}?\n\n{self.FW_WAIT_SHORT}"):
             return
+        self._settings_before_flash(lambda: self._flash_uf2_go(drive))
+
+    def _flash_uf2_go(self, drive: str):
         # The copy runs on this thread, so the window may stop responding until it finishes.
         self.fw_status_var.set(f"Copying firmware to {drive}… {self.FW_WAIT_SHORT} "
                                "This window may stop responding until the copy is done.")
@@ -1488,7 +1516,14 @@ class App(tk.Tk):
                                "minute before unplugging or reconnecting.")
         messagebox.showinfo("Flash Complete",
                             "Firmware copied. The device will now reboot on its own — give it a minute "
-                            "to finish before unplugging or reconnecting.")
+                            "to finish before unplugging or reconnecting." + self._restore_note())
+
+    def _restore_note(self) -> str:
+        if not self._pending_restore:
+            return ""
+        return ("\n\nYour settings were saved to:\n" + self._pending_restore["path"] +
+                "\n\nWhen the radio has restarted, connect to it: the app offers to put the settings back "
+                "(or use Restore Settings… on this tab).")
 
     def _flash_esptool(self):
         self._run_esptool_action(erase_first=True)
@@ -1515,10 +1550,10 @@ class App(tk.Tk):
                 "Confirm", f"This will {action} the device over {port}. Continue?\n\n{self.FW_WAIT_SHORT}",
                 icon="warning"):
             return
-        if self.client.is_connected():
-            messagebox.showwarning("Disconnect First", "Disconnect from the device before flashing.")
-            return
+        # Erasing wipes the settings too, so save them first (this also disconnects).
+        self._settings_before_flash(lambda: self._esptool_continue(erase_first, write, port, action))
 
+    def _esptool_continue(self, erase_first: bool, write: bool, port: str, action: str):
         backup_dir = None
         if erase_first:
             choice = messagebox.askyesnocancel(
@@ -1626,6 +1661,191 @@ class App(tk.Tk):
     def _current_serial_port(self):
         sel = self.serial_port.get()
         return sel.split("  ")[0] if sel else None
+
+    # ── device settings backup / restore ─────────────────────────────────
+    def _device_label(self, b):
+        when = (b.get("created") or "?").replace("T", " ")
+        return f"{b.get('long_name') or b.get('node_id') or 'radio'}, saved {when} ({b.get('reason')})"
+
+    def _start_settings_backup(self, reason: str, then=None, quiet: bool = False):
+        """Save the connected radio's settings on a worker thread. `then(path)` runs on
+        the GUI thread once it is saved (path None if the backup failed)."""
+        if not self.client.is_connected() or not self.connected_info:
+            if then:
+                then(None)
+            return
+        device = dict(self.connected_info)
+        self._settings_busy = True
+        if not quiet:
+            self.settings_backup_var.set("Saving the radio's settings…")
+
+        def worker():
+            try:
+                path = self.client.backup_settings(device, reason, include_extras=True)
+                self.fw_queue.put(("settings_backup_saved", (path, reason, then, quiet)))
+            except Exception as exc:
+                self.fw_queue.put(("settings_backup_failed", (str(exc), then, quiet)))
+
+        threading.Thread(target=worker, daemon=True, name="settings-backup").start()
+
+    def _backup_settings_now(self):
+        if self._settings_busy:
+            return
+        self._start_settings_backup(sb.MANUAL)
+
+    def _open_settings_folder(self):
+        node = (self.connected_info or self._last_device or {}).get("node_id")
+        folder = sb.device_dir(node) if node and os.path.isdir(sb.device_dir(node)) else sb.backup_root()
+        os.makedirs(folder, exist_ok=True)
+        try:
+            os.startfile(folder)  # Windows
+        except AttributeError:
+            webbrowser.open(f"file://{folder}")
+
+    def _settings_before_flash(self, then):
+        """Make sure the radio's settings are saved before a firmware update, then call
+        then() — or don't, if the user would rather stop. Connected: take a fresh
+        backup, then disconnect (flashing needs the port). Not connected (e.g. already
+        in bootloader mode): fall back to the newest backup of the radio."""
+        if self.client.is_connected() and self.connected_info:
+            self.fw_status_var.set("Saving the radio's settings before the update…")
+
+            def saved(path):
+                if path is None:
+                    if not messagebox.askyesno(
+                            "Settings Not Saved",
+                            "The radio's settings couldn't be saved (see the Log tab).\n\n"
+                            "Update the firmware anyway? The update may erase them, and you'd have to "
+                            "set the radio up again by hand.", icon="warning", default="no"):
+                        self.fw_status_var.set("Cancelled — nothing was changed.")
+                        return
+                else:
+                    self._pending_restore = {"path": path, "node_id": self.connected_info.get("node_id")}
+                self._append_log("Disconnecting so the firmware can be written…")
+                self.client.disconnect()
+                self.after(1500, then)
+
+            self._start_settings_backup(sb.BEFORE_UPDATE, then=saved)
+            return
+
+        node = (self._last_device or {}).get("node_id")
+        best = sb.best_backup(node) if node else sb.best_backup()
+        if best is None:
+            if not messagebox.askyesno(
+                    "No Settings Backup",
+                    "There's no saved copy of this radio's settings, and the update may erase them.\n\n"
+                    "To save them: cancel, connect to the radio (Connection tab), then come back and start "
+                    "the update again — the settings are saved automatically.\n\n"
+                    "Update anyway, without a settings backup?", icon="warning", default="no"):
+                self.fw_status_var.set("Cancelled — connect to the radio first so its settings get saved.")
+                return
+        else:
+            same = node and best["node_id"] == node
+            if not messagebox.askyesno(
+                    "Settings Backup",
+                    "The radio isn't connected, so its settings can't be saved right now. The update will "
+                    f"use the {'newest' if same else 'newest saved'} backup instead:\n\n"
+                    f"{self._device_label(best)}\n\n"
+                    + ("" if same else "Check that this is the radio you're updating.\n\n")
+                    + "Continue with the update? (Choose No to connect first and save fresh settings.)",
+                    icon="question"):
+                self.fw_status_var.set("Cancelled — nothing was changed.")
+                return
+            self._pending_restore = {"path": best["path"], "node_id": best["node_id"]}
+        then()
+
+    def _after_connect_settings(self):
+        """Run once a radio has connected and its config is loaded: offer back the
+        settings saved before a firmware update, or save a fresh snapshot."""
+        if not self.client.is_connected() or not self.connected_info:
+            return
+        node = self.connected_info.get("node_id")
+        pending = self._pending_restore
+        if pending and pending.get("node_id") not in (None, "", "?", node):
+            pending = None   # a different radio connected; keep the offer for the right one
+        fresh = self.client.radio_unconfigured()
+        offer = None
+        if pending and os.path.exists(pending["path"]):
+            offer = pending["path"]
+        elif fresh:
+            best = sb.best_backup(node)
+            offer = best["path"] if best else None
+        if offer:
+            try:
+                data = sb.load(offer)
+            except sb.BackupError as exc:
+                self._append_log(f"Settings backup unreadable: {exc}")
+                data = None
+            if data is not None:
+                why = ("This radio has just had a firmware update." if pending else
+                       "This radio has no LoRa region set — it looks freshly updated or reset.")
+                if messagebox.askyesno(
+                        "Restore Settings?",
+                        f"{why} Put back the settings saved earlier?\n\n{sb.describe(data)}\n\n"
+                        "The radio restarts once they're written; reconnect afterwards.",
+                        icon="question"):
+                    self._pending_restore = None
+                    self._restore_settings(offer, data)
+                    return
+                if pending:
+                    self._pending_restore = None
+                    self.settings_backup_var.set(
+                        f"Not restored. The backup is kept: {offer} — use Restore Settings… to put it back later.")
+        if fresh:
+            # Don't let an empty, just-flashed radio become the newest "backup".
+            self.settings_backup_var.set("This radio has no settings yet (LoRa region unset), so none were saved. "
+                                         "Use Restore Settings… to load a backup.")
+            return
+        self._start_settings_backup(sb.ON_CONNECT, quiet=True)
+
+    def _restore_settings_clicked(self):
+        if not self.client.is_connected() or not self.connected_info:
+            messagebox.showwarning("Restore Settings", "Connect to the radio first.")
+            return
+        node = self.connected_info.get("node_id")
+        best = sb.best_backup(node)
+        folder = os.path.dirname(best["path"]) if best else (
+            sb.device_dir(node) if os.path.isdir(sb.device_dir(node)) else sb.backup_root())
+        path = filedialog.askopenfilename(
+            title="Choose a settings backup to restore", initialdir=folder,
+            initialfile=os.path.basename(best["path"]) if best else "",
+            filetypes=[("Settings backup", "settings_*.json"), ("JSON", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            data = sb.load(path)
+        except sb.BackupError as exc:
+            messagebox.showerror("Restore Settings", str(exc))
+            return
+        if not messagebox.askyesno(
+                "Restore Settings",
+                f"Write these settings to the connected radio ({self.connected_info.get('long_name')})?\n\n"
+                f"{sb.describe(data)}\n\nEvery setting on the radio is replaced. It restarts once they're "
+                "written; reconnect afterwards.", icon="warning"):
+            return
+        self._restore_settings(path, data)
+
+    def _restore_settings(self, path: str, data: dict):
+        node = (self.connected_info or {}).get("node_id")
+        from_node = data.get("device", {}).get("node_id")
+        include_identity = True
+        if from_node and node and from_node != node:
+            choice = messagebox.askyesnocancel(
+                "Backup From Another Radio",
+                f"This backup came from {from_node}, but the connected radio is {node}.\n\n"
+                "Yes — copy the settings but keep this radio's own encryption key pair (recommended: two "
+                "radios with the same key would be mistaken for each other)\n"
+                "No — copy everything, including the other radio's key pair\n"
+                "Cancel — change nothing", icon="warning")
+            if choice is None:
+                return
+            include_identity = not choice
+        self.settings_backup_var.set(f"Restoring settings from {os.path.basename(path)}…")
+        self.fw_status_var.set("Restoring the radio's settings — don't unplug it…")
+        self.btn_restore_settings.config(state="disabled")
+        self.btn_backup_settings.config(state="disabled")
+        self._append_log(f"Restoring settings from {path}")
+        self.client.restore_settings(data, include_identity=include_identity)
 
     # ── MQTT tab ─────────────────────────────────────────────────────────
     def _build_mqtt_tab(self):
@@ -2573,7 +2793,7 @@ class App(tk.Tk):
                                    (f" Previous firmware backed up to {backup_path}" if backup_path else ""))
             if backup_path:
                 self._append_log(f"Firmware backup saved: {backup_path}")
-            messagebox.showinfo("Flash Complete", "esptool finished successfully." + note)
+            messagebox.showinfo("Flash Complete", "esptool finished successfully." + note + self._restore_note())
 
         elif kind == "fw_restore_check":
             port, path, info, errors, warnings = payload
@@ -2592,7 +2812,29 @@ class App(tk.Tk):
                 return
             self._start_restore(port, path)
 
+        elif kind == "settings_backup_saved":
+            path, reason, then, quiet = payload
+            self._settings_busy = False
+            self.settings_backup_var.set(f"Settings saved at {datetime.now():%H:%M} ({reason}): "
+                                         f"{os.path.basename(path)} — Open Folder to see it.")
+            self._append_log(f"Settings backup ({reason}): {path}")
+            if reason == sb.MANUAL:
+                messagebox.showinfo("Settings Saved", f"The radio's settings were saved to:\n{path}")
+            if then:
+                then(path)
+
+        elif kind == "settings_backup_failed":
+            err, then, quiet = payload
+            self._settings_busy = False
+            self.settings_backup_var.set(f"Couldn't save the radio's settings: {err}")
+            self._append_log(f"Settings backup failed: {err}")
+            if not quiet and not then:
+                messagebox.showerror("Settings Not Saved", err)
+            if then:
+                then(None)
+
         elif kind == "fw_restored":
+            self._pending_restore = None   # the full-flash image brings its own settings back
             port, path = payload
             self.fw_status_var.set(f"Restore complete via {port}. The device is restarting.")
             self._append_log(f"Firmware restored from {path}")
@@ -2642,6 +2884,10 @@ class App(tk.Tk):
             self.btn_flash_esp.config(state="disabled")
             self.uf2_frame.pack_forget()
             self.esp_frame.pack_forget()
+            self._last_device = dict(payload)
+            self.btn_backup_settings.config(state="normal")
+            self.btn_restore_settings.config(state="normal")
+            self.after(1500, self._after_connect_settings)
 
         elif kind == "disconnected":
             self._connect_attempt += 1  # invalidate any pending connect-timeout check
@@ -2654,6 +2900,8 @@ class App(tk.Tk):
                 lbl.config(text="—")
             self._append_log("Disconnected")
             self.fw_current_var.set("Not connected")
+            self.btn_backup_settings.config(state="disabled")
+            self.btn_restore_settings.config(state="disabled")
             self.btn_check_updates.config(state="normal" if self.fw_board_manual.get() else "disabled")
             self.btn_save_settings.config(state="disabled")
             self.btn_discard_settings.config(state="disabled")
@@ -2680,8 +2928,31 @@ class App(tk.Tk):
             self.btn_save_settings.config(state="normal" if self.client.is_connected() else "disabled")
             self.btn_save_mqtt.config(state="normal" if self.client.is_connected() else "disabled")
             self.btn_save_lora.config(state="normal" if self.client.is_connected() else "disabled")
+            self.btn_backup_settings.config(state="normal" if self.client.is_connected() else "disabled")
+            self.btn_restore_settings.config(state="normal" if self.client.is_connected() else "disabled")
             self._update_network_gate()
             messagebox.showerror("Meshtastic Error", str(payload))
+
+        elif kind == "restore_progress":
+            self.fw_status_var.set(f"Restoring settings: {payload}…")
+            self.status_var.set(f"Restoring settings: {payload}…")
+
+        elif kind == "settings_restored":
+            written, skipped = payload["written"], payload["skipped"]
+            self.btn_restore_settings.config(state="normal" if self.client.is_connected() else "disabled")
+            self.btn_backup_settings.config(state="normal" if self.client.is_connected() else "disabled")
+            self.fw_status_var.set("Settings restored — the radio is restarting.")
+            self.settings_backup_var.set(f"Restored {len(written)} part(s) at {datetime.now():%H:%M}.")
+            self.status_var.set("Settings restored — the radio is restarting")
+            self._append_log(f"Settings restored: {', '.join(written)}")
+            if skipped:
+                self._append_log(f"Settings not restored: {', '.join(skipped)}")
+            messagebox.showinfo(
+                "Settings Restored",
+                "The saved settings were written to the radio. It restarts to apply them, so the connection "
+                "will drop — reconnect in a minute and check the Settings, LoRa, MQTT and Network tabs." +
+                ("\n\nNot restored (the new firmware doesn't have them):\n  " + "\n  ".join(skipped)
+                 if skipped else ""))
 
         elif kind == "settings_saved":
             self.status_var.set("Settings saved")

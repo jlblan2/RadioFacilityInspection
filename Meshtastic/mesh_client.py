@@ -28,6 +28,8 @@ import meshtastic.util
 from meshtastic.protobuf import channel_pb2, config_pb2
 from meshtastic.util import genPSK256
 
+import settings_backup
+
 BROADCAST_ADDR = "^all"
 
 TCP_CONNECT_TIMEOUT_SECS = 8
@@ -1002,6 +1004,41 @@ class MeshClient:
                 self.events.put(("error", f"Delete channel failed: {exc}"))
 
         threading.Thread(target=worker, daemon=True, name="mesh-delete-channel").start()
+
+    # ── whole-radio settings backup / restore (see settings_backup.py) ──────
+    def backup_settings(self, device: dict, reason: str, include_extras: bool = True) -> str:
+        """Save every setting of the connected radio to a JSON file; returns its path.
+        Blocking (canned messages / ringtone need a round trip each), so call it
+        from a worker thread."""
+        iface = self.interface
+        if iface is None:
+            raise RuntimeError("Not connected")
+        return settings_backup.save(settings_backup.capture(iface, device, reason, include_extras))
+
+    def radio_unconfigured(self) -> bool:
+        """True when the connected radio has no LoRa region yet (fresh firmware or factory reset)."""
+        return self.interface is not None and settings_backup.radio_unconfigured(self.interface)
+
+    def restore_settings(self, data: dict, include_identity: bool = True):
+        """Write a settings backup to the connected radio on a background thread.
+        Reports 'restore_progress' (str) while writing, then 'settings_restored'
+        ({'written','skipped'}) or 'error'. The radio reboots at the end."""
+        iface = self.interface
+        if iface is None:
+            raise RuntimeError("Not connected")
+
+        def worker():
+            try:
+                result = settings_backup.restore(
+                    iface, data, include_identity=include_identity,
+                    on_step=lambda text: self.events.put(("restore_progress", text)))
+                self.events.put(("settings_restored", result))
+            except (Exception, SystemExit) as exc:   # the library calls sys.exit() on some bad values
+                self.events.put(("error", f"Restoring settings failed part-way: {exc}\n\n"
+                                          "The radio may have some of the old settings. Reconnect and "
+                                          "run Restore Settings again."))
+
+        threading.Thread(target=worker, daemon=True, name="mesh-restore-settings").start()
 
     def factory_reset(self, full: bool = False):
         """Wipe device config/NodeDB back to defaults. Does NOT touch firmware."""
