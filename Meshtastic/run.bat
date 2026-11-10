@@ -1,6 +1,8 @@
 @echo off
 rem Launches the Meshtastic GUI and keeps this window open if anything goes wrong,
 rem so the error can be read instead of flashing by. Installs missing packages first.
+rem   run.bat /setup   only checks Python and installs the packages, without starting the app
+rem                    (install.bat uses this; afterwards PY names the Python that was picked).
 cd /d "%~dp0"
 
 rem Which Python to use: the one named in MESHTASTIC_PYTHON if that is set; otherwise the newest
@@ -10,17 +12,19 @@ rem must not be picked); otherwise plain "python".
 set "PY=%MESHTASTIC_PYTHON%"
 if not defined PY (
     for %%V in (3.13 3.14 3.12 3.11 3.10) do (
+        rem "&&" (exit code exactly 0), not "if not errorlevel 1": the newer py launcher
+        rem exits with a NEGATIVE code when that version is not installed.
         if not defined PY (
-            call py -%%V -c "import sys" >nul 2>&1
-            if not errorlevel 1 set "PY=py -%%V"
+            call py -%%V -c "import sys" >nul 2>&1 && set "PY=py -%%V"
         )
     )
 )
 if not defined PY set "PY=python"
 
 rem "call" so that a .bat/.cmd shim (pyenv-win, for example) returns here instead of ending this script.
+rem Checks below compare with 0, since a failing launcher can return a negative exit code.
 call %PY% --version >nul 2>&1
-if errorlevel 1 (
+if not "%errorlevel%"=="0" (
     echo Python was not found. Install Python 3.13 ^(64-bit^) from python.org/downloads
     echo and check "Add Python to PATH" and "tcl/tk and IDLE" during setup.
     pause
@@ -46,7 +50,7 @@ if "%PYSTATUS%"=="4" (
 )
 
 call %PY% -c "import tkinter" >nul 2>&1
-if errorlevel 1 (
+if not "%errorlevel%"=="0" (
     echo.
     echo tkinter, the window toolkit, is missing from this Python and pip cannot add it.
     echo Reinstall Python and make sure "tcl/tk and IDLE" is ticked.
@@ -56,7 +60,7 @@ if errorlevel 1 (
 
 rem The check also needs a feature from recent meshtastic releases, so an old copy gets upgraded.
 call %PY% -c "import meshtastic, pubsub; from meshtastic.protobuf import config_pb2; config_pb2.Config.LoRaConfig.FEM_LNA_Mode" >nul 2>&1
-if errorlevel 1 (
+if not "%errorlevel%"=="0" (
     echo Installing required packages ^(one-time^)...
     call %PY% -m pip install --upgrade meshtastic truststore esptool
     if errorlevel 1 (
@@ -83,8 +87,10 @@ if errorlevel 1 (
     )
 )
 
+if /i "%~1"=="/setup" exit /b 0
+
 call %PY% meshtastic_gui.py
-if errorlevel 1 (
+if not "%errorlevel%"=="0" (
     echo.
     echo The app exited with an error ^(see above^).
     pause
