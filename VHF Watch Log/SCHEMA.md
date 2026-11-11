@@ -229,7 +229,7 @@ The chronological radio log. Entries can only be added; the triggers below stop 
 | watch_id | INTEGER | NOT NULL, FK → watches(id) | |
 | patrol_id | INTEGER | FK → patrols(id), nullable | The vessel the entry is about |
 | station | TEXT | NOT NULL DEFAULT '' | The other station |
-| direction | TEXT | NOT NULL DEFAULT 'FROM', CHECK in (`FROM`, `TO`) | |
+| direction | TEXT | NOT NULL DEFAULT 'FROM', CHECK in (`FROM`, `TO`) | Who started the call. The app fills in `TO` (the watch stander's routine call to the vessel), or `FROM` for DISTRESS, URGENCY and SAFETY (the vessel calls in). The column default is not used. |
 | time_utc | TEXT | NOT NULL | When the traffic happened |
 | channel | TEXT | NOT NULL DEFAULT '' | |
 | entry_type | TEXT | NOT NULL | See the list below |

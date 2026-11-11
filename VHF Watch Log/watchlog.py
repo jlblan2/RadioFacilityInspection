@@ -1047,7 +1047,7 @@ class App:
         self.f["station"] = field(1, "Vessel / station", ttk.Combobox(form, width=22))
         self.f["direction"] = field(2, "From / to", ttk.Combobox(form, width=7, state="readonly",
                                                                   values=["From", "To"]))
-        self.f["direction"].set("From")
+        self.f["direction"].set("To")
         self.f["channel"] = field(3, "Ch", ttk.Combobox(form, width=6))
         self.f["type"] = field(4, "Type", ttk.Combobox(form, width=14, state="readonly", values=ENTRY_TYPES))
         self.f["type"].set("OPS NORMAL")
@@ -1063,6 +1063,9 @@ class App:
             w.bind("<Return>", lambda e: self.log_entry())
         self.f["station"].bind("<<ComboboxSelected>>", lambda e: self._station_picked())
         self.f["station"].bind("<FocusOut>", lambda e: self._station_picked(), add="+")
+        # Picking a type sets From / to: "To" for the watch stander's routine calls, "From" when
+        # the vessel calls in with an issue (distress, urgency, safety). It can still be changed.
+        self.f["type"].bind("<<ComboboxSelected>>", lambda e: self._default_direction())
         self.hint = ttk.Label(lower, text="", foreground="#666")
         self.hint.pack(anchor="w", pady=(2, 0))
 
@@ -1348,13 +1351,16 @@ class App:
         else:
             self.hint.config(text="")
 
+    def _default_direction(self):
+        self.f["direction"].set("From" if wdb.default_direction(self.f["type"].get()) == "FROM" else "To")
+
     def quick(self, entry_type):
         pid = self._selected_patrol()
         if not pid:
             return
         self._patrol_selected()
         self.f["type"].set(entry_type)
-        self.f["direction"].set("From")
+        self._default_direction()
         if entry_type == "OPS NORMAL" and not self.f["status"].get():
             self.f["status"].insert(0, "Ops normal")
         self.f["position"].focus_set()
@@ -1388,7 +1394,7 @@ class App:
         self._gar_pid = None          # refill GAR with the (possibly new) latest score
         self._station_picked()
         f["type"].set("OPS NORMAL")
-        f["direction"].set("From")
+        self._default_direction()
         self.refresh()
         self._check_alerts(utcnow())
         f["position"].focus_set()

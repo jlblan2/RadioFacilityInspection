@@ -140,6 +140,14 @@ class TestLogRules(Base):
         self.assertIn("22 → 28 (1300Z)", html)
         self.assertIn("GAR changed 22 → 28", reports.ics309_html(self.db, self.wid))
 
+    def test_default_direction(self):
+        routine = self.db.add_entry(self.wid, "OPS NORMAL", time=T0, patrol_id=self.pid)
+        issue = self.db.add_entry(self.wid, "URGENCY", time=T0, patrol_id=self.pid, status="Engine failure")
+        safety = self.db.add_entry(self.wid, "SAFETY", time=T0, station="Skiff", status="Debris in channel")
+        given = self.db.add_entry(self.wid, "OPS NORMAL", time=T0, patrol_id=self.pid, direction="from")
+        rows = {e["id"]: e["direction"] for e in self.db.entries(self.wid)}
+        self.assertEqual([rows[i] for i in (routine, issue, safety, given)], ["TO", "FROM", "FROM", "FROM"])
+
     def test_distress_needs_synopsis_and_sets_retention(self):
         with self.assertRaises(LogError):
             self.db.add_entry(self.wid, "DISTRESS", station="Unknown vessel")

@@ -103,10 +103,13 @@ A WATCH
                    Other entry types: Position, Comms, Weather, Phone, Distress, Urgency,
                    Safety, Lost comms, Radio check, Equipment, Watch relief, Other.
                    "Vessel / station" can also be typed freely (e.g. Station Mayport).
-                   From / to: "From" when the vessel or station called you (you received
-                   the traffic); "To" when you called them. The log shows "(to)" after
-                   the station's name for "To" entries, and the ICS 309 puts the names in
-                   its From and To columns.
+                   From / to: who started the call. "To" (the default) = you, the radio
+                   watch stander, called the vessel, as for routine checks (underway, ops
+                   normal, moored, position). "From" = the vessel called you; picking
+                   Distress, Urgency or Safety switches to From, since with an issue the
+                   vessel initiates the call. Change it whenever the call went the other
+                   way. The log shows "(to)" after the station's name for "To" entries, and
+                   the ICS 309 puts the names in its From and To columns.
                    GAR: filled in with the vessel's latest GAR score. If the GAR changes
                    (weather, crew fatigue...), type the new score before logging; the app
                    asks you to confirm, and the change shows in the GAR column ("22 → 31"),

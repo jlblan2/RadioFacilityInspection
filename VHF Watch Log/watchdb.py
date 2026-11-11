@@ -41,6 +41,14 @@ ENTRY_TYPES = (
 CONTACT_TYPES = {"OPS NORMAL", "POSITION", "UNDERWAY", "MOORED", "COMMS", "WEATHER",
                  "PHONE", "DISTRESS", "URGENCY", "SAFETY", "RADIO CHECK"}
 DISTRESS_TYPES = {"DISTRESS", "URGENCY"}
+# Direction of the traffic. Routine calls are made by the radio watch stander TO the vessel;
+# when there is an issue (distress, urgency, safety) the vessel initiates the call, so FROM.
+VESSEL_INITIATED_TYPES = {"DISTRESS", "URGENCY", "SAFETY"}
+
+
+def default_direction(entry_type):
+    """'FROM' for traffic the vessel starts (an issue), otherwise 'TO' (the watch stander's call)."""
+    return "FROM" if str(entry_type).upper() in VESSEL_INITIATED_TYPES else "TO"
 
 DEFAULT_SETTINGS = {
     "station_call_sign": "Amelia 9",
@@ -872,11 +880,13 @@ class WatchDB:
             "JOIN members m ON m.id = pc.member_id WHERE pc.patrol_id=? ORDER BY pc.seq", (pid,)).fetchall()
 
     # ---- log entries
-    def add_entry(self, wid, entry_type, time=None, patrol_id=None, station="", direction="FROM",
+    def add_entry(self, wid, entry_type, time=None, patrol_id=None, station="", direction=None,
                   channel=None, position="", heading="", status="", remarks="", corrects_id=None, gar=None):
         """gar: the patrol's GAR score at this report. Blank or None keeps the current one
-        (current_gar); a different value records a GAR change. Ignored for entries with no patrol."""
+        (current_gar); a different value records a GAR change. Ignored for entries with no patrol.
+        direction: 'TO' or 'FROM'; None uses default_direction(entry_type)."""
         entry_type = entry_type.upper()
+        direction = (direction or default_direction(entry_type)).upper()
         if entry_type not in ENTRY_TYPES:
             raise LogError(f"Unknown entry type {entry_type}")
         if entry_type in DISTRESS_TYPES and not (status or remarks):
