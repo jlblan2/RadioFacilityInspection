@@ -9,6 +9,7 @@ meshtastic library invokes pubsub callbacks from its own background
 threads, never from the caller's thread.
 """
 
+import atexit
 import base64
 import ipaddress
 import queue
@@ -25,7 +26,7 @@ import meshtastic.serial_interface
 import meshtastic.tcp_interface
 import meshtastic.ble_interface
 import meshtastic.util
-from meshtastic.protobuf import channel_pb2, config_pb2
+from meshtastic.protobuf import channel_pb2, config_pb2, mesh_pb2
 from meshtastic.util import genPSK256
 
 import settings_backup
@@ -364,6 +365,115 @@ def _release_interface(iface) -> None:
                 pass
 
 
+class _ReliableBLEInterface(meshtastic.ble_interface.BLEInterface):
+    """
+    BLEInterface whose shutdown actually releases the Bluetooth link.
+
+    The library hands bleak `lambda: self.close()` as its disconnected callback.
+    bleak runs that callback on the BLE event-loop thread, and close() then
+    makes blocking calls (send "disconnect", client.disconnect()) that wait for
+    that same loop — a deadlock. So when the radio reboots: the loop thread
+    hangs forever, "connection lost" is never published, and bleak never gets
+    to close its Windows GATT session. That session has maintain_connection
+    set, so Windows quietly reconnects to the radio as soon as it is back up;
+    the radio then stops advertising and every later connect fails its scan
+    with "No Meshtastic BLE peripheral ... found" until the app is restarted.
+
+    Here the callback only hands off to another thread, and close() is
+    idempotent, never blocks without a timeout, and always tears the bleak
+    client and its event loop down.
+    """
+
+    def __init__(self, address, on_created=None):
+        self._close_lock = threading.Lock()
+        self._closed = False
+        if on_created is not None:
+            on_created(self)  # lets the caller cancel/close us while we are still connecting
+        try:
+            super().__init__(address=address)
+        except BaseException:
+            self.close()  # the library only cleans up after its own BLEError
+            raise
+
+    def connect(self, address=None):
+        device = self.find_device(address)  # ~10 s scan
+        if self._closed:
+            raise self.BLEError("BLE connect cancelled")
+        client = meshtastic.ble_interface.BLEClient(
+            device.address, disconnected_callback=lambda _c: self._link_dropped()
+        )
+        self.client = client  # visible to close() from here on, even if connect() fails
+        client.connect()
+        client.discover()
+        return client
+
+    def _link_dropped(self):
+        # Called on the BLE event-loop thread — must not block it.
+        threading.Thread(target=self.close, daemon=True, name="ble-close").start()
+
+    def close(self) -> None:
+        client = getattr(self, "client", None)
+        if client is not None and threading.current_thread() is client._eventThread:
+            self._link_dropped()  # never block the BLE event loop on itself
+            return
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+
+        timer = getattr(self, "heartbeatTimer", None)
+        if timer:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+        bleak_client = getattr(client, "bleak_client", None)
+        if bleak_client is not None:
+            try:
+                if bleak_client.is_connected:  # tell the radio we're leaving (best effort)
+                    bye = mesh_pb2.ToRadio()
+                    bye.disconnect = True
+                    client.async_await(
+                        bleak_client.write_gatt_char(
+                            meshtastic.ble_interface.TORADIO_UUID, bye.SerializeToString(), response=True
+                        ),
+                        timeout=3,
+                    )
+            except Exception:
+                pass
+
+        self._want_receive = False
+        rx = getattr(self, "_receiveThread", None)
+        if rx is not None and rx is not threading.current_thread():
+            rx.join(timeout=2)
+        self._receiveThread = None
+
+        if client is not None:
+            handler = getattr(self, "_exit_handler", None)
+            if handler is not None:
+                try:
+                    atexit.unregister(handler)
+                except Exception:
+                    pass
+            if bleak_client is not None:
+                try:
+                    # Closes the GATT session, so Windows lets go of the radio.
+                    client.async_await(bleak_client.disconnect(), timeout=10)
+                except Exception:
+                    pass
+            try:
+                client.async_run(client._stop_event_loop())
+                client._eventThread.join(timeout=5)
+            except Exception:
+                pass
+            self.client = None
+        try:
+            self._disconnected()  # publishes "meshtastic.connection.lost"
+        except Exception:
+            pass
+
+
 class _AttemptCancelled(Exception):
     """Raised inside a connect factory when the attempt was cancelled before it opened anything."""
 
@@ -389,6 +499,14 @@ def _describe_connect_error(kind: str, exc: Exception) -> str:
             "select the Meshtastic device, and enter its Bluetooth PIN when prompted "
             "(set on the Settings tab — default is a 6-digit fixed PIN). "
             "Once Windows shows it as \"Paired\", reconnect from here."
+        )
+    if kind == "ble" and "No Meshtastic BLE peripheral" in text:
+        return (
+            "Connection failed: the device isn't advertising over Bluetooth right now.\n\n"
+            "If it just rebooted, give it a minute to come back up and try again. Otherwise check "
+            "that it is powered on and in range, that Bluetooth is enabled on it, and that nothing "
+            "else (the Meshtastic phone app, another PC) is already connected to it — a connected "
+            "device stops advertising."
         )
     if kind == "ble" and "Error writing BLE" in text:
         return (
@@ -513,8 +631,12 @@ class MeshClient:
         # (or the GATT write right after) fails once, then an immediate retry with
         # the exact same address succeeds — seen firsthand multiple times against
         # real hardware. Serial/TCP don't show this pattern, so only BLE retries.
+        # A radio that just rebooted also needs a while before it advertises again
+        # (each attempt's scan is ~10 s), hence one more retry than the flakiness needs.
         self._connect(
-            "ble", lambda register: meshtastic.ble_interface.BLEInterface(address=address), retries=2
+            "ble", lambda register: _ReliableBLEInterface(address, on_created=register), retries=3,
+            # Not paired in Windows: retrying can't help, so report it straight away.
+            retry_if=lambda exc: "Insufficient Authentication" not in str(exc),
         )
 
     def _connect(self, kind: str, factory, retries: int = 0, retry_if=None):

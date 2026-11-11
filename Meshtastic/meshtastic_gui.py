@@ -519,6 +519,8 @@ class App(tk.Tk):
         self.ble_addr.grid(row=0, column=1, padx=6)
         self.btn_ble_scan = tk.Button(self.ble_frame, text="Scan", font=FA, command=self._scan_ble)
         self.btn_ble_scan.grid(row=0, column=2)
+        tk.Label(self.ble_frame, text="Be patient, this option may take a few minutes",
+                  font=FB, fg=ERR_RED, justify="left").grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         btns = tk.Frame(f)
         btns.pack(fill="x", **pad)
