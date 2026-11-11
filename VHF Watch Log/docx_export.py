@@ -10,6 +10,12 @@ from xml.sax.saxutils import escape
 
 from watchdb import fmt_local, fmt_z, from_iso, station_lines, tz_abbr
 
+
+def _gar_text(db, pid):
+    """A patrol's GAR as printed: '22', or '22 → 18 (1415Z)' when it changed (same as reports.gar_text)."""
+    hist = db.gar_history(pid)
+    return hist[0][1] + "".join(f" → {g} ({fmt_z(t)})" for t, g, _ in hist[1:])
+
 W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' \
     'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
 PAGE_W = 12240 - 2 * 720  # twips between 0.5 in margins
@@ -129,7 +135,8 @@ def watch_log_docx(db, wid, path, tz=None):
         vessel = [[run(f"{p['facility_no']} {p['vessel_name']}", bold=True, size=12)]]
         if p["call_sign"]:
             vessel.append([run(p["call_sign"], size=8)])
-        vals = [vessel, [run(p["patrol_order"], bold=True, size=12)], [run(p["gar"])], [run(p["pob"])]]
+        vals = [vessel, [run(p["patrol_order"], bold=True, size=12)], [run(_gar_text(db, p["id"]))],
+                [run(p["pob"])]]
         if print_cell:
             vals.append([run(p["cell"])])
         widths = ([3200, 2200, 1400, 1400, PAGE_W - 8200] if print_cell else [4000, 2800, 1700, PAGE_W - 8500])
@@ -167,6 +174,7 @@ def watch_log_docx(db, wid, path, tz=None):
     body.append(heading("Radio log"))
     entries = db.entries(wid)
     by_id = {e["id"]: e for e in entries}
+    changes = db.gar_changes(wid)
     widths = [850, 700, 1250, 550, 1300, 2700, 2900]
     widths.append(PAGE_W - sum(widths))
     rows = [[[run(h, bold=True, size=9)] for h in
@@ -184,6 +192,8 @@ def watch_log_docx(db, wid, path, tz=None):
         rem = [[r(e["status"])]] if e["status"] else []
         if e["remarks"]:
             rem.append([r(e["remarks"])])
+        if e["id"] in changes:
+            rem.append([run(f"GAR changed {changes[e['id']][0] or '-'} → {changes[e['id']][1]}", bold=True, size=9)])
         if e["corrects_id"] and e["corrects_id"] in by_id:
             rem.append([run(f"(corrects entry at {fmt_z(by_id[e['corrects_id']]['time_utc'])})", italic=True, size=8)])
         who = e["station"] + (" (to)" if e["direction"] == "TO" else "")

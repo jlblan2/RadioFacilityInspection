@@ -2,7 +2,7 @@
 
 - **Engine:** SQLite 3, using Python's standard `sqlite3` module.
 - **Foreign keys:** turned on for every connection (`PRAGMA foreign_keys = ON`).
-- **Schema version:** 4, stored in `meta.schema_version`.
+- **Schema version:** 5, stored in `meta.schema_version`.
 - **Where it is defined:** the `SCHEMA` string in `watchdb.py`. The migrations are in `WatchDB._migrate()`.
 - **File location:** `%APPDATA%\N. Tesla\VHF Watch Log\watchlog.db`.
 
@@ -49,7 +49,7 @@ Internal bookkeeping for the program.
 | Column | Type | Constraints | Notes |
 |---|---|---|---|
 | key | TEXT | PRIMARY KEY | `schema_version` |
-| value | TEXT | | `4` |
+| value | TEXT | | `5` |
 
 ### settings
 Station settings, stored as key/value pairs.
@@ -199,7 +199,7 @@ A vessel guarded during a watch.
 | watch_id | INTEGER | NOT NULL, FK → watches(id) | |
 | vessel_id | INTEGER | NOT NULL, FK → vessels(id) | |
 | patrol_order | TEXT | NOT NULL DEFAULT '' | Patrol order (PO) number |
-| gar | TEXT | NOT NULL DEFAULT '' | GAR risk score |
+| gar | TEXT | NOT NULL DEFAULT '' | GAR risk score at the start of the patrol. Later changes are recorded on log entries (`log_entries.gar`). |
 | pob | INTEGER | NOT NULL DEFAULT 0 | Persons on board |
 | cell | TEXT | NOT NULL DEFAULT '' | Cell phone for this patrol |
 | mission | TEXT | NOT NULL DEFAULT '' | Patrol type, usually one of `patrol_types.name` |
@@ -237,6 +237,7 @@ The chronological radio log. Entries can only be added; the triggers below stop 
 | heading | TEXT | NOT NULL DEFAULT '' | |
 | status | TEXT | NOT NULL DEFAULT '' | |
 | remarks | TEXT | NOT NULL DEFAULT '' | |
+| gar | TEXT | NOT NULL DEFAULT '' | Added in v5. The patrol's GAR score at this report; empty for entries with no patrol and for entries made before v5 |
 | created_utc | TEXT | NOT NULL | When the entry was typed in (so late entries show) |
 | corrects_id | INTEGER | FK → log_entries(id), nullable | The struck entry this one replaces |
 | struck | INTEGER | NOT NULL DEFAULT 0 | 1 means struck through |
@@ -249,6 +250,13 @@ LOST COMMS, RADIO CHECK, EQUIPMENT, WATCH RELIEF, OTHER.
 
 - Every type except LOST COMMS, EQUIPMENT, WATCH RELIEF and OTHER restarts the vessel's ops-normal clock.
 - A watch that logged DISTRESS or URGENCY is kept for 3 years instead of 1.
+
+**GAR changes.** Each entry for a patrol stores the GAR in effect at that report. The entry form fills it in
+with the patrol's current GAR, and typing a different score records a change. The current GAR is the `gar` of
+the patrol's latest entry that is not struck (`time_utc`, then `id`) and is not empty; if there is none, it is
+`patrols.gar`. Walking those entries in time order from `patrols.gar` gives the history: an entry whose
+`gar` differs from the one before it is a change. A struck entry no longer counts, so correcting a mistyped
+GAR is done the usual way, by strike and re-enter.
 
 ---
 
@@ -295,3 +303,4 @@ A correction works like this:
 | 2 | Radio Watch Standers and Radio Stations tables | Adds `watches.rws_id`, `station_id` and `station_info` with `ALTER TABLE` |
 | 3 | `QE` qualification | Rebuilds `qualifications` (SQLite cannot change a CHECK constraint in place), copies the rows across, and recreates the views |
 | 4 | `patrol_types` table | Creates the table and fills it with the six built-in types, plus any other mission already used on a patrol in that database |
+| 5 | `log_entries.gar`, the GAR score on each entry | Adds the column with `ALTER TABLE` (existing entries get `''`), then drops and recreates the `log_no_edit` trigger so the new column can't be edited either |

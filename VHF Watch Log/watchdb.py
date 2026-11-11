@@ -26,7 +26,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 APP = "VHF Watch Log"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 QUALS = ("COXSWAIN", "CREW", "PWC", "TCO", "QE")  # QE = Qualification Examiner
 QUAL_STATUS = ("QUALIFIED", "TRAINEE", "REYR")
@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS log_entries(
     heading TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT '',
     remarks TEXT NOT NULL DEFAULT '',
+    gar TEXT NOT NULL DEFAULT '',
     created_utc TEXT NOT NULL,
     corrects_id INTEGER REFERENCES log_entries(id),
     struck INTEGER NOT NULL DEFAULT 0,
@@ -221,7 +222,7 @@ CREATE TRIGGER IF NOT EXISTS log_no_delete BEFORE DELETE ON log_entries
 BEGIN SELECT RAISE(ABORT, 'Log entries cannot be deleted; strike them through instead'); END;
 CREATE TRIGGER IF NOT EXISTS log_no_edit BEFORE UPDATE OF
     watch_id, patrol_id, station, direction, time_utc, channel, entry_type, position,
-    heading, status, remarks, created_utc, corrects_id ON log_entries
+    heading, status, remarks, gar, created_utc, corrects_id ON log_entries
 BEGIN SELECT RAISE(ABORT, 'Log entries cannot be edited; strike through and re-enter'); END;
 CREATE TRIGGER IF NOT EXISTS log_no_unstrike BEFORE UPDATE OF struck ON log_entries
 WHEN OLD.struck = 1
@@ -445,7 +446,14 @@ class WatchDB:
                     "INSERT OR IGNORE INTO patrol_types(name, sort) "
                     "SELECT DISTINCT TRIM(mission), ? FROM patrols WHERE TRIM(mission) <> ''",
                     (len(DEFAULT_PATROL_TYPES),))
-        cols ={r["name"] for r in self.con.execute("PRAGMA table_info(watches)")}
+        if "gar" not in {r["name"] for r in self.con.execute("PRAGMA table_info(log_entries)")}:
+            # v5 records the GAR score on each log entry, so changes during a patrol are kept.
+            # The no-edit trigger is recreated so the new column is protected like the others.
+            with self.con:
+                self.con.execute("ALTER TABLE log_entries ADD COLUMN gar TEXT NOT NULL DEFAULT ''")
+                self.con.execute("DROP TRIGGER IF EXISTS log_no_edit")
+            self.con.executescript(SCHEMA)
+        cols = {r["name"] for r in self.con.execute("PRAGMA table_info(watches)")}
         qsql = self.con.execute("SELECT sql FROM sqlite_master WHERE name='qualifications'").fetchone()[0]
         if "'QE'" not in qsql:
             # v3 adds the QE qualification. SQLite cannot change a CHECK constraint in place,
@@ -865,7 +873,9 @@ class WatchDB:
 
     # ---- log entries
     def add_entry(self, wid, entry_type, time=None, patrol_id=None, station="", direction="FROM",
-                  channel=None, position="", heading="", status="", remarks="", corrects_id=None):
+                  channel=None, position="", heading="", status="", remarks="", corrects_id=None, gar=None):
+        """gar: the patrol's GAR score at this report. Blank or None keeps the current one
+        (current_gar); a different value records a GAR change. Ignored for entries with no patrol."""
         entry_type = entry_type.upper()
         if entry_type not in ENTRY_TYPES:
             raise LogError(f"Unknown entry type {entry_type}")
@@ -878,17 +888,20 @@ class WatchDB:
             if p is None or p["watch_id"] != wid:
                 raise LogError("That patrol is not part of this watch")
             station = station or p["facility_no"]
+            gar = str(gar or "").strip() or self.current_gar(patrol_id)
+        else:
+            gar = ""
         if not station:
             raise LogError("Say which vessel or station the entry is for")
         try:
             with self.con:
                 cur = self.con.execute(
                     "INSERT INTO log_entries(watch_id, patrol_id, station, direction, time_utc, channel,"
-                    " entry_type, position, heading, status, remarks, created_utc, corrects_id)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " entry_type, position, heading, status, remarks, gar, created_utc, corrects_id)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (wid, patrol_id, station, direction, to_iso(when),
                      channel if channel is not None else self.setting("default_channel"),
-                     entry_type, position, heading, status, remarks, to_iso(utcnow()), corrects_id))
+                     entry_type, position, heading, status, remarks, gar, to_iso(utcnow()), corrects_id))
                 # Underway / moored entries move the patrol along.
                 if p is not None and entry_type == "UNDERWAY":
                     self.con.execute(
@@ -918,7 +931,7 @@ class WatchDB:
         if e is None:
             raise LogError("No such entry")
         fields = {k: e[k] for k in ("entry_type", "patrol_id", "station", "direction", "channel",
-                                    "position", "heading", "status", "remarks")}
+                                    "position", "heading", "status", "remarks", "gar")}
         fields["time"] = e["time_utc"]
         fields.update(new)
         if e["struck"]:
@@ -935,6 +948,40 @@ class WatchDB:
     def entries(self, wid):
         return self.con.execute(
             "SELECT * FROM log_entries WHERE watch_id=? ORDER BY time_utc, id", (wid,)).fetchall()
+
+    # ---- GAR score history
+    def current_gar(self, pid):
+        """The patrol's GAR now: from its latest (not struck) log entry that has one,
+        otherwise the GAR given when the patrol was added."""
+        r = self.con.execute(
+            "SELECT gar FROM log_entries WHERE patrol_id=? AND struck=0 AND gar<>''"
+            " ORDER BY time_utc DESC, id DESC LIMIT 1", (pid,)).fetchone()
+        if r:
+            return r["gar"]
+        p = self.con.execute("SELECT gar FROM patrols WHERE id=?", (pid,)).fetchone()
+        return p["gar"] if p else ""
+
+    def gar_history(self, pid):
+        """[(time_utc or None, gar, entry_id or None)]: the starting GAR, then each change, in time order."""
+        p = self.con.execute("SELECT gar FROM patrols WHERE id=?", (pid,)).fetchone()
+        prev = p["gar"] if p else ""
+        out = [(None, prev, None)]
+        for e in self.con.execute(
+                "SELECT id, time_utc, gar FROM log_entries WHERE patrol_id=? AND struck=0 AND gar<>''"
+                " ORDER BY time_utc, id", (pid,)):
+            if e["gar"] != prev:
+                out.append((e["time_utc"], e["gar"], e["id"]))
+                prev = e["gar"]
+        return out
+
+    def gar_changes(self, wid):
+        """{entry_id: (old GAR, new GAR)} for the entries of a watch that changed a patrol's GAR."""
+        out = {}
+        for p in self.patrols(wid):
+            hist = self.gar_history(p["id"])
+            for (_, old, _), (_, new, eid) in zip(hist, hist[1:]):
+                out[eid] = (old, new)
+        return out
 
     # ---- ops-normal schedule
     def last_contact(self, pid):

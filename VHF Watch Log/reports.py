@@ -68,6 +68,12 @@ def _tzname(iso, tz=None):
     return tz_abbr(dt.astimezone(tz)) if dt else "local"
 
 
+def gar_text(db, pid):
+    """A patrol's GAR as printed: '22', or '22 → 18 (1415Z)' when it changed during the patrol."""
+    hist = db.gar_history(pid)
+    return hist[0][1] + "".join(f" → {g} ({fmt_z(t)})" for t, g, _ in hist[1:])
+
+
 def _crew_cell(c):
     name = f"{esc(c['last_name'])} ({esc(c['member_no'])})"
     return name + ("<br><span class='small'>(Trainee)</span>" if c["trainee"] else "")
@@ -114,7 +120,8 @@ def watch_log_html(db, wid, tz=None):
         out.append("<tr>" + "".join(row1) + "</tr>")
         vals = (f"<td class='big'>{esc(p['facility_no'])} {esc(p['vessel_name'])}"
                 f"{'<br><span class=small>' + esc(p['call_sign']) + '</span>' if p['call_sign'] else ''}</td>"
-                f"<td class='big'>{esc(p['patrol_order'])}</td><td>{esc(p['gar'])}</td><td>{esc(p['pob'])}</td>")
+                f"<td class='big'>{esc(p['patrol_order'])}</td><td>{esc(gar_text(db, p['id']))}</td>"
+                f"<td>{esc(p['pob'])}</td>")
         if print_cell:
             vals += f"<td>{esc(p['cell'])}</td>"
         out.append(f"<tr>{vals}</tr></table>")
@@ -140,6 +147,7 @@ def watch_log_html(db, wid, tz=None):
                "<th style='width:12%'>Type</th><th>Position / heading</th><th>Status / remarks</th>"
                "<th style='width:7%'>Init</th></tr>")
     by_id = {e["id"]: e for e in entries}
+    changes = db.gar_changes(wid)
     for e in entries:
         cls = "struck" if e["struck"] else ("dist" if e["entry_type"] in ("DISTRESS", "URGENCY") else "")
         pos = esc(e["position"])
@@ -148,6 +156,9 @@ def watch_log_html(db, wid, tz=None):
         rem = esc(e["status"])
         if e["remarks"]:
             rem += f"{'<br>' if rem else ''}{esc(e['remarks'])}"
+        if e["id"] in changes:
+            old, new = changes[e["id"]]
+            rem += f"{'<br>' if rem else ''}<b>GAR changed {esc(old or '-')} → {esc(new)}</b>"
         if e["corrects_id"] and e["corrects_id"] in by_id:
             rem += f"{'<br>' if rem else ''}<i class='small'>(corrects entry at {fmt_z(by_id[e['corrects_id']]['time_utc'])})</i>"
         who = esc(e["station"]) + (" (to)" if e["direction"] == "TO" else "")
@@ -207,10 +218,12 @@ def ics309_html(db, wid, incident=None, tz=None):
         return f"{d.astimezone(tz):%m/%d/%Y %H%M} ({d:%H%MZ})" if d else ""
 
     rows = []
+    changes = db.gar_changes(wid)
     for e in entries:
         frm, to = (e["station"], station) if e["direction"] == "FROM" else (station, e["station"])
         msg = e["entry_type"]
-        for part in (e["position"], ("Hdg " + e["heading"]) if e["heading"] else "", e["status"], e["remarks"]):
+        gar = f"GAR changed {changes[e['id']][0] or '-'} → {changes[e['id']][1]}" if e["id"] in changes else ""
+        for part in (e["position"], ("Hdg " + e["heading"]) if e["heading"] else "", e["status"], e["remarks"], gar):
             if part:
                 msg += " — " + part
         rows.append(f"<tr><td>{fmt_local(e['time_utc'], tz)}<br><span class='small'>{fmt_z(e['time_utc'])}</span></td>"

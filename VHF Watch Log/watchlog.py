@@ -268,7 +268,7 @@ class PatrolDialog(Dialog):
         self.pob = ttk.Spinbox(b, from_=0, to=99, width=8)
         self.row(0, "Vessel", self.vessel)
         self.row(1, "Patrol order (PO#)", self.po)
-        self.row(2, "GAR score", self.gar, "GAR 2.0 total")
+        self.row(2, "GAR score", self.gar, "GAR 2.0 total at the start; later changes go on log entries")
         self.row(3, "Coxswain", self.cox)
         self.row(4, "Crew (click to select)", lf)
         self.row(5, "POB", self.pob, "counted from the people picked; change if others are aboard")
@@ -365,13 +365,15 @@ class StrikeDialog(Dialog):
         self.chan = self.row(5, "Channel", ttk.Combobox(b, width=44, values=[c["name"] for c in self.db.channels()]))
         self.chan.set(e["channel"])
         self.f = {}
-        for r, (k, label) in enumerate([("position", "Position"), ("heading", "Heading"),
-                                        ("status", "Status"), ("remarks", "Remarks")], 6):
+        fields = [("position", "Position"), ("heading", "Heading"), ("status", "Status"), ("remarks", "Remarks")]
+        if e["patrol_id"]:
+            fields.insert(2, ("gar", "GAR"))
+        for r, (k, label) in enumerate(fields, 6):
             w = self.row(r, label, ttk.Entry(b, width=46))
             w.insert(0, e[k])
             self.f[k] = w
         ttk.Button(self.body, text="Strike only (no correction)", command=self._strike_only).grid(
-            row=10, column=1, sticky="w", pady=(8, 0))
+            row=6 + len(fields), column=1, sticky="w", pady=(8, 0))
         self.init.focus_set()
 
     def _strike_only(self):
@@ -1051,13 +1053,16 @@ class App:
         self.f["type"].set("OPS NORMAL")
         self.f["position"] = field(5, "Position (Loc)", ttk.Entry(form, width=28), 2)
         self.f["heading"] = field(6, "Hdg", ttk.Entry(form, width=8))
-        self.f["status"] = field(7, "Status", ttk.Entry(form, width=22), 1)
-        self.f["remarks"] = field(8, "Remarks", ttk.Entry(form, width=26), 2)
+        # GAR: filled in with the vessel's latest GAR; type a new score to record a change.
+        self.f["gar"] = field(7, "GAR", ttk.Entry(form, width=5))
+        self.f["status"] = field(8, "Status", ttk.Entry(form, width=22), 1)
+        self.f["remarks"] = field(9, "Remarks", ttk.Entry(form, width=26), 2)
         self.log_btn = ttk.Button(form, text="Log", command=self.log_entry, width=8)
-        self.log_btn.grid(row=1, column=9, padx=(6, 0))
+        self.log_btn.grid(row=1, column=10, padx=(6, 0))
         for w in self.f.values():
             w.bind("<Return>", lambda e: self.log_entry())
         self.f["station"].bind("<<ComboboxSelected>>", lambda e: self._station_picked())
+        self.f["station"].bind("<FocusOut>", lambda e: self._station_picked(), add="+")
         self.hint = ttk.Label(lower, text="", foreground="#666")
         self.hint.pack(anchor="w", pady=(2, 0))
 
@@ -1065,7 +1070,8 @@ class App:
         lf = ttk.LabelFrame(lower, text="Radio log", padding=6)
         lf.pack(fill="both", expand=True, pady=(4, 0))
         lcols = [("z", "Time Z", 60), ("loc", "Local", 50), ("st", "Vessel / station", 130), ("ch", "Ch", 40),
-                 ("type", "Type", 100), ("pos", "Position", 220), ("hdg", "Hdg", 60), ("status", "Status", 160),
+                 ("type", "Type", 100), ("pos", "Position", 220), ("hdg", "Hdg", 60), ("gar", "GAR", 70),
+                 ("status", "Status", 160),
                  ("rem", "Remarks", 260), ("init", "Struck by", 70)]
         inner = ttk.Frame(lf)
         inner.pack(fill="both", expand=True)
@@ -1174,7 +1180,7 @@ class App:
                 # Call sign from Data > Vessels; the facility # stands in until one is entered.
                 p["call_sign"] or f"Facility {p['facility_no']}", p["vessel_name"], p["patrol_order"],
                 (cox["last_name"] + (" (T)" if cox["trainee"] else "") + (f"  {cox['phone']}" if cox["phone"] else ""))
-                if cox else "", mates, p["pob"], p["gar"],
+                if cox else "", mates, p["pob"], self.db.current_gar(p["id"]),
                 row["state"], f"{fmt_z(row['last'])} / {fmt_local(row['last'])}" if row["last"] else "",
                 f"{fmt_z(row['due'])} / {fmt_local(row['due'])}" if row["due"] else "", left])
             label = f"{p['facility_no']} {p['vessel_name']}".strip()
@@ -1190,7 +1196,10 @@ class App:
             return
         entries = self.db.entries(self.wid)
         times = {e["id"]: e["time_utc"] for e in entries}
+        changes = self.db.gar_changes(self.wid)
         for e in entries:
+            # GAR column: "22 → 18" where the score changed; otherwise the score at that report.
+            gar = f"{changes[e['id']][0] or '-'} → {changes[e['id']][1]}" if e["id"] in changes else e["gar"]
             tag = "struck" if e["struck"] else ("distress" if e["entry_type"] in wdb.DISTRESS_TYPES else "")
             rem = e["remarks"]
             if e["corrects_id"]:
@@ -1198,7 +1207,7 @@ class App:
             self.log.insert("", "end", iid=str(e["id"]), tags=(tag,), values=[
                 fmt_z(e["time_utc"]), fmt_local(e["time_utc"]),
                 e["station"] + (" (to)" if e["direction"] == "TO" else ""), e["channel"], e["entry_type"],
-                e["position"], e["heading"], e["status"], rem, e["struck_by"]])
+                e["position"], e["heading"], gar, e["status"], rem, e["struck_by"]])
         kids = self.log.get_children()
         if kids:
             self.log.see(kids[-1])
@@ -1325,10 +1334,17 @@ class App:
 
     def _station_picked(self):
         pid = self.patrol_ids.get(self.f["station"].get())
+        if pid != getattr(self, "_gar_pid", None):
+            # New vessel: GAR starts at that vessel's latest score (blank for other stations).
+            self._gar_pid = pid
+            self.f["gar"].delete(0, "end")
+            if pid:
+                self.f["gar"].insert(0, self.db.current_gar(pid))
         if pid:
             p = self.db.patrol(pid)
             self.hint.config(text=f"{p['facility_no']} {p['vessel_name']}  ·  call sign {p['call_sign'] or '-'}  ·  "
-                                  f"cell {p['cell'] or '-'}  ·  float plan: {p['float_plan'] or '-'}")
+                                  f"cell {p['cell'] or '-'}  ·  GAR {self.db.current_gar(pid) or '-'}  ·  "
+                                  f"float plan: {p['float_plan'] or '-'}")
         else:
             self.hint.config(text="")
 
@@ -1352,17 +1368,25 @@ class App:
         try:
             when = parse_time(f["time"].get())
             pid = self.patrol_ids.get(station)
+            gar = f["gar"].get().strip()
+            if pid and gar and gar != self.db.current_gar(pid) and not messagebox.askyesno(
+                    "GAR change", f"Record a GAR change for {station}: "
+                    f"{self.db.current_gar(pid) or '(none)'} → {gar}?", parent=self.root):
+                f["gar"].focus_set()
+                return
             self.db.add_entry(
                 self.wid, f["type"].get(), time=when, patrol_id=pid,
                 station="" if pid else station, direction="TO" if f["direction"].get() == "To" else "FROM",
                 channel=f["channel"].get().strip(), position=f["position"].get().strip(),
                 heading=f["heading"].get().strip(), status=f["status"].get().strip(),
-                remarks=f["remarks"].get().strip())
+                remarks=f["remarks"].get().strip(), gar=gar)
         except (LogError, ValueError) as ex:
             messagebox.showerror("Log entry", str(ex), parent=self.root)
             return
         for k in ("time", "position", "heading", "status", "remarks"):
             f[k].delete(0, "end")
+        self._gar_pid = None          # refill GAR with the (possibly new) latest score
+        self._station_picked()
         f["type"].set("OPS NORMAL")
         f["direction"].set("From")
         self.refresh()

@@ -114,6 +114,32 @@ class TestLogRules(Base):
         with self.assertRaises(LogError):
             self.db.strike(e, "JB")
 
+    def test_gar_changes_are_tracked(self):
+        self.db.update_patrol(self.pid, gar="22")
+        a = self.db.add_entry(self.wid, "UNDERWAY", time=T0, patrol_id=self.pid)              # blank: carries 22
+        b = self.db.add_entry(self.wid, "OPS NORMAL", time=T0 + timedelta(minutes=30), patrol_id=self.pid,
+                              gar="31")                                                       # weather built
+        c = self.db.add_entry(self.wid, "OPS NORMAL", time=T0 + timedelta(minutes=60), patrol_id=self.pid)
+        other = self.db.add_entry(self.wid, "COMMS", time=T0, station="Station Mayport", gar="99")
+        rows = {e["id"]: e for e in self.db.entries(self.wid)}
+        self.assertEqual([rows[i]["gar"] for i in (a, b, c, other)], ["22", "31", "31", ""])
+        self.assertEqual(self.db.current_gar(self.pid), "31")
+        self.assertEqual(self.db.gar_changes(self.wid), {b: ("22", "31")})
+        self.assertEqual([g for _, g, _ in self.db.gar_history(self.pid)], ["22", "31"])
+        self.assertEqual(self.db.patrol(self.pid)["gar"], "22")   # starting GAR is kept
+        # The GAR on an entry can't be edited, only corrected; a struck change no longer counts.
+        with self.assertRaises(Exception):
+            with self.db.con:
+                self.db.con.execute("UPDATE log_entries SET gar='5' WHERE id=?", (b,))
+        fixed = self.db.correct(b, "jb", gar="28")
+        self.assertEqual(self.db.gar_changes(self.wid), {fixed: ("22", "28"), c: ("28", "31")})
+        self.db.strike(c, "jb")
+        self.assertEqual(self.db.current_gar(self.pid), "28")
+        html = reports.watch_log_html(self.db, self.wid)
+        self.assertIn("GAR changed 22 → 28", html)
+        self.assertIn("22 → 28 (1300Z)", html)
+        self.assertIn("GAR changed 22 → 28", reports.ics309_html(self.db, self.wid))
+
     def test_distress_needs_synopsis_and_sets_retention(self):
         with self.assertRaises(LogError):
             self.db.add_entry(self.wid, "DISTRESS", station="Unknown vessel")
@@ -416,7 +442,7 @@ class TestWatchstandersAndStations(unittest.TestCase):
             db.save_member({}, {"QE": "QUALIFIED"}, mid=mid)
             self.assertEqual(db.quals(mid)["QE"], "QUALIFIED")
             self.assertEqual(db.con.execute("SELECT COUNT(*) FROM coxswains").fetchone()[0], 1)
-            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "4")
+            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "5")
             db.close()
 
     def test_v3_database_gets_patrol_types(self):
@@ -435,11 +461,40 @@ class TestWatchstandersAndStations(unittest.TestCase):
             db = WatchDB(p)
             names = [t["name"] for t in db.patrol_types()]
             self.assertEqual(names, [n for n, _ in DEFAULT_PATROL_TYPES] + ["Fireworks safety zone"])
-            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "4")
+            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "5")
             db.set_patrol_types([("SAR", "")])
             db.close()
             db = WatchDB(p)  # reopening an up-to-date database does not re-add removed types
             self.assertEqual([t["name"] for t in db.patrol_types()], ["SAR"])
+            db.close()
+
+    def test_v4_database_gets_entry_gar(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "v4.db")
+            db = WatchDB(p)
+            v = db.save_vessel({"facility_no": "1675"})
+            wid = db.open_watch(watchstander="X", when=T0)
+            pid = db.add_patrol(wid, v, gar="20")
+            old = db.add_entry(wid, "UNDERWAY", time=T0, patrol_id=pid)
+            db.close()
+            con = sqlite3.connect(p)  # a version-4 log_entries had no gar column
+            con.executescript("DROP TRIGGER log_no_edit; ALTER TABLE log_entries DROP COLUMN gar;"
+                              "CREATE TRIGGER log_no_edit BEFORE UPDATE OF watch_id, remarks ON log_entries"
+                              " BEGIN SELECT RAISE(ABORT, 'x'); END; UPDATE meta SET value='4';")
+            con.close()
+            db = WatchDB(p)
+            self.assertEqual(db.entry(old)["gar"], "")          # old entries: no GAR recorded
+            self.assertEqual(db.current_gar(pid), "20")         # falls back to the patrol's GAR
+            new = db.add_entry(wid, "OPS NORMAL", time=T0 + timedelta(minutes=30), patrol_id=pid, gar="25")
+            self.assertEqual(db.gar_changes(wid), {new: ("20", "25")})
+            with self.assertRaises(Exception):                  # the recreated trigger protects gar
+                with db.con:
+                    db.con.execute("UPDATE log_entries SET gar='1' WHERE id=?", (new,))
+            with self.assertRaises(Exception):                  # ... and still the other columns
+                with db.con:
+                    db.con.execute("UPDATE log_entries SET position='x' WHERE id=?", (new,))
+            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "5")
             db.close()
 
 

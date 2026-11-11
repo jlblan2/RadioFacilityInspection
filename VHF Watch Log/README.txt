@@ -103,6 +103,17 @@ A WATCH
                    Other entry types: Position, Comms, Weather, Phone, Distress, Urgency,
                    Safety, Lost comms, Radio check, Equipment, Watch relief, Other.
                    "Vessel / station" can also be typed freely (e.g. Station Mayport).
+                   From / to: "From" when the vessel or station called you (you received
+                   the traffic); "To" when you called them. The log shows "(to)" after
+                   the station's name for "To" entries, and the ICS 309 puts the names in
+                   its From and To columns.
+                   GAR: filled in with the vessel's latest GAR score. If the GAR changes
+                   (weather, crew fatigue...), type the new score before logging; the app
+                   asks you to confirm, and the change shows in the GAR column ("22 → 31"),
+                   on the patrol board, and on the printed log ("GAR changed 22 → 31" on
+                   that entry, and the GAR history under Vessels on patrol). The GAR on the
+                   patrol itself stays the score at the start. A wrong GAR is fixed like any
+                   entry: Strike / correct.
 4. Patrol board    Lists each vessel by its radio call sign (from Data > Vessels; the facility
                    number is shown until a call sign is entered) and its coxswain with phone
                    number, with the last contact and when the next ops-normal report
