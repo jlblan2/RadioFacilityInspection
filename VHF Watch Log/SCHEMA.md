@@ -2,7 +2,7 @@
 
 - **Engine:** SQLite 3, using Python's standard `sqlite3` module.
 - **Foreign keys:** turned on for every connection (`PRAGMA foreign_keys = ON`).
-- **Schema version:** 3, stored in `meta.schema_version`.
+- **Schema version:** 4, stored in `meta.schema_version`.
 - **Where it is defined:** the `SCHEMA` string in `watchdb.py`. The migrations are in `WatchDB._migrate()`.
 - **File location:** `%APPDATA%\N. Tesla\VHF Watch Log\watchlog.db`.
 
@@ -36,7 +36,8 @@ erDiagram
     log_entries |o--o| log_entries : "corrects_id"
 ```
 
-These tables stand on their own, with no foreign keys: `meta`, `settings`, `channels` and `contacts`.
+These tables stand on their own, with no foreign keys: `meta`, `settings`, `patrol_types`, `channels` and `contacts`.
+`patrols.mission` holds the patrol type's name as text, not a key (see `patrol_types`).
 
 ---
 
@@ -48,7 +49,7 @@ Internal bookkeeping for the program.
 | Column | Type | Constraints | Notes |
 |---|---|---|---|
 | key | TEXT | PRIMARY KEY | `schema_version` |
-| value | TEXT | | `3` |
+| value | TEXT | | `4` |
 
 ### settings
 Station settings, stored as key/value pairs.
@@ -131,6 +132,20 @@ Auxiliary fixed land radio facilities that keep the watch.
 | phone | TEXT | NOT NULL DEFAULT '' | Contact phone |
 | active | INTEGER | NOT NULL DEFAULT 1 | |
 
+### patrol_types
+The choices offered for a patrol's Mission (Add/Edit patrol). Edited under Data > Patrol types. Added in v4.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| name | TEXT | PRIMARY KEY | e.g. `Safety patrol` |
+| description | TEXT | NOT NULL DEFAULT '' | |
+| sort | INTEGER | NOT NULL DEFAULT 0 | Display order |
+
+Filled on first run (or by the v4 upgrade) with the list the app used to have built in: Safety patrol,
+Regatta / marine event patrol, Training, SAR, ATON verification and Chart updating.
+`patrols.mission` copies the name as text, and a mission that is not in the list can still be typed in,
+so renaming or removing a type never changes a patrol already logged.
+
 ### channels
 VHF channels offered in the log.
 
@@ -187,7 +202,7 @@ A vessel guarded during a watch.
 | gar | TEXT | NOT NULL DEFAULT '' | GAR risk score |
 | pob | INTEGER | NOT NULL DEFAULT 0 | Persons on board |
 | cell | TEXT | NOT NULL DEFAULT '' | Cell phone for this patrol |
-| mission | TEXT | NOT NULL DEFAULT '' | |
+| mission | TEXT | NOT NULL DEFAULT '' | Patrol type, usually one of `patrol_types.name` |
 | float_plan | TEXT | NOT NULL DEFAULT '' | |
 | interval_min | INTEGER | NOT NULL DEFAULT 30 | Minutes between ops-normal checks for this boat |
 | start_utc, end_utc | TEXT | nullable | |
@@ -279,3 +294,4 @@ A correction works like this:
 | 1 | First release | — |
 | 2 | Radio Watch Standers and Radio Stations tables | Adds `watches.rws_id`, `station_id` and `station_info` with `ALTER TABLE` |
 | 3 | `QE` qualification | Rebuilds `qualifications` (SQLite cannot change a CHECK constraint in place), copies the rows across, and recreates the views |
+| 4 | `patrol_types` table | Creates the table and fills it with the six built-in types, plus any other mission already used on a patrol in that database |

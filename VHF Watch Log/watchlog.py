@@ -250,8 +250,8 @@ class PatrolDialog(Dialog):
         self.gar = ttk.Entry(b, width=44)
         self.cell = ttk.Entry(b, width=44)
         self.interval = ttk.Spinbox(b, from_=5, to=120, increment=5, width=8)
-        self.mission = ttk.Combobox(b, width=42, values=["Safety patrol", "Regatta / marine event patrol",
-                                                          "Training", "SAR", "ATON verification", "Chart updating"])
+        # Choices come from Data > Patrol types; typing another mission is still allowed.
+        self.mission = ttk.Combobox(b, width=42, values=[t["name"] for t in db.patrol_types()])
         self.fp = ttk.Entry(b, width=44)
         self.cox = ttk.Combobox(b, width=42, state="readonly",
                                 values=["(none)"] + [member_label(c, c["status"]) for c in self.coxs])
@@ -762,7 +762,7 @@ def stations_window(parent, db, on_change):
 
 
 class ListEditor(tk.Toplevel):
-    """Ordered list of rows with a few text columns (channels, contacts)."""
+    """Ordered list of rows with a few text columns (patrol types, channels, contacts)."""
 
     def __init__(self, parent, title, columns, rows, save):
         super().__init__(parent)
@@ -942,6 +942,7 @@ class App:
         d.add_command(label="Members and qualifications...", command=lambda: MembersWindow(self.root, self.db, self.refresh))
         d.add_command(label="Radio watch standers...", command=lambda: watchstanders_window(self.root, self.db, self.refresh))
         d.add_command(label="Radio stations...", command=lambda: stations_window(self.root, self.db, self.refresh))
+        d.add_command(label="Patrol types...", command=self.edit_patrol_types)
         d.add_command(label="Channels...", command=self.edit_channels)
         d.add_command(label="Contacts...", command=self.edit_contacts)
         d.add_separator()
@@ -992,7 +993,7 @@ class App:
 
         # patrol board
         board = ttk.LabelFrame(pw, text="Patrol board", padding=6)
-        cols = [("vessel", "Vessel", 60), ("name", "Name", 150), ("po", "PO#", 70), ("cox", "Coxswain", 150),
+        cols = [("call_sign", "Call sign", 200), ("name", "Name", 150), ("po", "PO#", 70), ("cox", "Coxswain", 150),
                 ("crew", "Crew", 260), ("pob", "POB", 40), ("gar", "GAR", 40), ("state", "Status", 80),
                 ("last", "Last contact", 110), ("due", "Next report due", 120), ("left", "Min", 50)]
         bf = ttk.Frame(board)
@@ -1163,7 +1164,8 @@ class App:
                 mins = int((row["due"] - now).total_seconds() // 60)
                 left = f"{mins:+d}" if mins < 0 else str(mins)
             self.board.item(str(p["id"]), tags=(row["state"],), values=[
-                p["facility_no"], p["vessel_name"], p["patrol_order"],
+                # Call sign from Data > Vessels; the facility # stands in until one is entered.
+                p["call_sign"] or f"Facility {p['facility_no']}", p["vessel_name"], p["patrol_order"],
                 (cox["last_name"] + (" (T)" if cox["trainee"] else "")) if cox else "", mates, p["pob"], p["gar"],
                 row["state"], f"{fmt_z(row['last'])} / {fmt_local(row['last'])}" if row["last"] else "",
                 f"{fmt_z(row['due'])} / {fmt_local(row['due'])}" if row["due"] else "", left])
@@ -1441,6 +1443,11 @@ class App:
             self.db.backup(path)
             messagebox.showinfo(APP, f"Backed up to {path}\n\nIt holds member names, numbers and phone "
                                      "numbers: keep it private.", parent=self.root)
+
+    def edit_patrol_types(self):
+        ListEditor(self.root, "Patrol types", [("Patrol type", 260), ("Description", 350)],
+                   [(t["name"], t["description"]) for t in self.db.patrol_types()],
+                   lambda rows: (self.db.set_patrol_types(rows), self.refresh()))
 
     def edit_channels(self):
         ListEditor(self.root, "Channels", [("Channel", 90), ("Use", 520)],

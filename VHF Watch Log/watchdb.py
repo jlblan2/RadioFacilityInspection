@@ -6,6 +6,7 @@ Tables
   qualifications  member x (COXSWAIN | CREW | PWC | TCO | QE) -> QUALIFIED | TRAINEE | REYR
   coxswains/crew  VIEWS giving the two lists in the shape originally asked for
   channels, contacts, settings
+  patrol_types    the Mission choices for a patrol (Safety patrol, SAR, ...)
   watches         one radio watch (opened/closed, watchstander, time check, radio check ...)
   patrols         a vessel guarded during a watch (PO#, GAR, POB, float plan, interval)
   patrol_crew     who is aboard each patrol (COX / CREW, trainee flag at the time)
@@ -25,7 +26,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 APP = "VHF Watch Log"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 QUALS = ("COXSWAIN", "CREW", "PWC", "TCO", "QE")  # QE = Qualification Examiner
 QUAL_STATUS = ("QUALIFIED", "TRAINEE", "REYR")
@@ -56,6 +57,15 @@ DEFAULT_CHANNELS = [
     ("21A", "Coast Guard working"),
     ("81A", "Coast Guard working"),
     ("9", "Calling (recreational) / Nassau Port"),
+]
+# Patrol types (the Mission list on a patrol), as first shipped; editable under Data > Patrol types.
+DEFAULT_PATROL_TYPES = [
+    ("Safety patrol", ""),
+    ("Regatta / marine event patrol", ""),
+    ("Training", ""),
+    ("SAR", "Search and rescue"),
+    ("ATON verification", "Aids to navigation"),
+    ("Chart updating", ""),
 ]
 DEFAULT_CONTACTS = [
     ("COAST GUARD Station Mayport Comm", "904-564-7516", ""),
@@ -117,6 +127,10 @@ CREATE TABLE IF NOT EXISTS channels(
 CREATE TABLE IF NOT EXISTS contacts(
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '', sort INTEGER NOT NULL DEFAULT 0);
+-- Patrol types: the choices offered for a patrol's Mission. patrols.mission keeps the text
+-- itself, so renaming or removing a type never changes a patrol already logged.
+CREATE TABLE IF NOT EXISTS patrol_types(
+    name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', sort INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE IF NOT EXISTS watches(
     id INTEGER PRIMARY KEY,
@@ -412,6 +426,7 @@ class WatchDB:
                                      [(n, p, i) for i, (n, p) in enumerate(DEFAULT_CHANNELS)])
                 self.con.executemany("INSERT INTO contacts(name, phone, notes, sort) VALUES(?,?,?,?)",
                                      [(n, ph, no, i) for i, (n, ph, no) in enumerate(DEFAULT_CONTACTS)])
+                self._seed_patrol_types()
         else:
             self._migrate()
             with self.con:
@@ -419,7 +434,18 @@ class WatchDB:
 
     def _migrate(self):
         """Bring an older database up to SCHEMA_VERSION without touching logged data."""
-        cols = {r["name"] for r in self.con.execute("PRAGMA table_info(watches)")}
+        r = self.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        version = int(r["value"]) if r and str(r["value"]).isdigit() else 1
+        if version < 4:
+            # v4 adds patrol_types (created by SCHEMA above); fill it with the list the app
+            # used to have built in, plus any other missions already logged in this database.
+            with self.con:
+                self._seed_patrol_types()
+                self.con.execute(
+                    "INSERT OR IGNORE INTO patrol_types(name, sort) "
+                    "SELECT DISTINCT TRIM(mission), ? FROM patrols WHERE TRIM(mission) <> ''",
+                    (len(DEFAULT_PATROL_TYPES),))
+        cols ={r["name"] for r in self.con.execute("PRAGMA table_info(watches)")}
         qsql = self.con.execute("SELECT sql FROM sqlite_master WHERE name='qualifications'").fetchone()[0]
         if "'QE'" not in qsql:
             # v3 adds the QE qualification. SQLite cannot change a CHECK constraint in place,
@@ -440,6 +466,11 @@ class WatchDB:
                 if name not in cols:
                     self.con.execute(f"ALTER TABLE watches ADD COLUMN {name} {decl}")
             self.con.execute("INSERT OR REPLACE INTO meta VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))
+
+    def _seed_patrol_types(self):
+        """Add the built-in patrol types (call inside a transaction). Existing rows are kept."""
+        self.con.executemany("INSERT OR IGNORE INTO patrol_types VALUES(?,?,?)",
+                             [(n, d, i) for i, (n, d) in enumerate(DEFAULT_PATROL_TYPES)])
 
     def _run(self, sql, args=()):
         try:
@@ -568,6 +599,21 @@ class WatchDB:
             self.con.execute("DELETE FROM channels")
             self.con.executemany("INSERT INTO channels VALUES(?,?,?)",
                                  [(n.strip(), p.strip(), i) for i, (n, p) in enumerate(rows) if n.strip()])
+
+    def patrol_types(self):
+        return self.con.execute("SELECT * FROM patrol_types ORDER BY sort, name").fetchall()
+
+    def set_patrol_types(self, rows):
+        """rows: (name, description) in display order. Patrols already logged keep their mission text."""
+        seen, clean = set(), []
+        for n, d in rows:
+            n = n.strip()
+            if n and n.lower() not in seen:
+                seen.add(n.lower())
+                clean.append((n, d.strip(), len(clean)))
+        with self.con:
+            self.con.execute("DELETE FROM patrol_types")
+            self.con.executemany("INSERT INTO patrol_types VALUES(?,?,?)", clean)
 
     def contacts(self):
         return self.con.execute("SELECT * FROM contacts ORDER BY sort, id").fetchall()

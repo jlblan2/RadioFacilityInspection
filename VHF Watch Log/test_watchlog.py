@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 import reports
-from watchdb import LogError, WatchDB, parse_time, to_iso
+from watchdb import DEFAULT_PATROL_TYPES, LogError, WatchDB, parse_time, to_iso
 
 UTC = timezone.utc
 EST = timezone(timedelta(hours=-5), "EST")
@@ -31,6 +31,15 @@ class TestTables(Base):
         self.assertIn("83A", [c["name"] for c in self.db.channels()])
         self.assertTrue(any("Mayport" in c["name"] for c in self.db.contacts()))
         self.assertEqual(self.db.interval_min(), 30)
+        self.assertEqual([(t["name"], t["description"]) for t in self.db.patrol_types()], DEFAULT_PATROL_TYPES)
+
+    def test_edit_patrol_types(self):
+        self.db.add_patrol(self.wid, self.db.save_vessel({"facility_no": "900"}), mission="Training")
+        self.db.set_patrol_types([(" Fireworks ", " safety zone "), ("", "skipped"), ("SAR", ""), ("sar", "dup")])
+        self.assertEqual([(t["name"], t["description"]) for t in self.db.patrol_types()],
+                         [("Fireworks", "safety zone"), ("SAR", "")])
+        # a patrol already logged keeps its mission text
+        self.assertIn("Training", [p["mission"] for p in self.db.patrols(self.wid)])
 
     def test_coxswain_and_crew_views(self):
         self.assertEqual([r["last_name"] for r in self.db.coxswains()], ["Anchor"])
@@ -395,7 +404,30 @@ class TestWatchstandersAndStations(unittest.TestCase):
             db.save_member({}, {"QE": "QUALIFIED"}, mid=mid)
             self.assertEqual(db.quals(mid)["QE"], "QUALIFIED")
             self.assertEqual(db.con.execute("SELECT COUNT(*) FROM coxswains").fetchone()[0], 1)
-            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "3")
+            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "4")
+            db.close()
+
+    def test_v3_database_gets_patrol_types(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "v3.db")
+            db = WatchDB(p)
+            v = db.save_vessel({"facility_no": "1675"})
+            wid = db.open_watch(watchstander="X", when=T0)
+            db.add_patrol(wid, v, mission="Fireworks safety zone")   # typed in, not from the list
+            db.add_patrol(wid, db.save_vessel({"facility_no": "1676"}), mission="SAR")
+            db.close()
+            con = sqlite3.connect(p)  # a version-3 database had no patrol_types table
+            con.executescript("DROP TABLE patrol_types; UPDATE meta SET value='3';")
+            con.close()
+            db = WatchDB(p)
+            names = [t["name"] for t in db.patrol_types()]
+            self.assertEqual(names, [n for n, _ in DEFAULT_PATROL_TYPES] + ["Fireworks safety zone"])
+            self.assertEqual(db.con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "4")
+            db.set_patrol_types([("SAR", "")])
+            db.close()
+            db = WatchDB(p)  # reopening an up-to-date database does not re-add removed types
+            self.assertEqual([t["name"] for t in db.patrol_types()], ["SAR"])
             db.close()
 
 
