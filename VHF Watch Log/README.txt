@@ -98,8 +98,13 @@ A WATCH
                    Data > Patrol types, or type another), float plan / area, ops-normal
                    interval. Any number of vessels.
 3. Log entries     Click a vessel on the patrol board, then Underway / Ops normal / Moored to
-                   fill in the form, type the position and heading, and press Enter. Leave
-                   Time blank for "now", or type a late entry as HHMM (local) or HHMMZ (UTC).
+                   fill in the form, type the position and heading, and press Enter.
+                   Time: taken the moment you start the entry (your first keystroke or pick
+                   in the form, or the Underway / Ops normal / Moored button) and shown in
+                   Time, e.g. 1432Z, so slow typing doesn't make the entry late. The log
+                   keeps it to the second. Picking a vessel on the patrol board alone does
+                   not start the clock. To restart it, clear Time; for a late entry, type
+                   the time over it as HHMM (local) or HHMMZ (UTC).
                    Other entry types: Position, Comms, Weather, Phone, Distress, Urgency,
                    Safety, Lost comms, Radio check, Equipment, Watch relief, Other.
                    "Vessel / station" can also be typed freely (e.g. Station Mayport).

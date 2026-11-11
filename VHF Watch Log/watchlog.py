@@ -1033,7 +1033,8 @@ class App:
 
         # entry form
         lower = ttk.Frame(pw)
-        form = ttk.LabelFrame(lower, text="New log entry   (Enter logs it; leave Time blank for now)", padding=8)
+        form = ttk.LabelFrame(lower, text="New log entry   (Time is taken when you start the entry; "
+                                          "Enter logs it)", padding=8)
         form.pack(fill="x")
         self.f = {}
 
@@ -1066,6 +1067,14 @@ class App:
         # Picking a type sets From / to: "To" for the watch stander's routine calls, "From" when
         # the vessel calls in with an issue (distress, urgency, safety). It can still be changed.
         self.f["type"].bind("<<ComboboxSelected>>", lambda e: self._default_direction())
+        # The entry's time is the moment the entry is started (first keystroke or pick in the
+        # form), not when Enter is pressed, so typing doesn't delay it. It shows in Time.
+        self._stamp, self._stamp_text = None, ""
+        for k, w in self.f.items():
+            if k != "time":
+                w.bind("<Key>", self._start_entry, add="+")
+                if isinstance(w, ttk.Combobox):
+                    w.bind("<<ComboboxSelected>>", self._start_entry, add="+")
         self.hint = ttk.Label(lower, text="", foreground="#666")
         self.hint.pack(anchor="w", pady=(2, 0))
 
@@ -1351,6 +1360,18 @@ class App:
         else:
             self.hint.config(text="")
 
+    def _start_entry(self, event=None):
+        """Stamp the time when an entry is started, if Time is still empty. Keys that don't type
+        anything (Enter, Tab, arrows, Shift...) don't start an entry."""
+        if event is not None and event.type == tk.EventType.KeyPress:
+            if not ((event.char and event.char.isprintable()) or event.keysym in ("BackSpace", "Delete")):
+                return
+        if self.f["time"].get().strip() or not self.editable():
+            return
+        self._stamp = utcnow()
+        self._stamp_text = fmt_z(self._stamp)
+        self.f["time"].insert(0, self._stamp_text)
+
     def _default_direction(self):
         self.f["direction"].set("From" if wdb.default_direction(self.f["type"].get()) == "FROM" else "To")
 
@@ -1359,6 +1380,7 @@ class App:
         if not pid:
             return
         self._patrol_selected()
+        self._start_entry()               # the Underway / Ops normal / Moored click starts the entry
         self.f["type"].set(entry_type)
         self._default_direction()
         if entry_type == "OPS NORMAL" and not self.f["status"].get():
@@ -1372,7 +1394,10 @@ class App:
         f = self.f
         station = f["station"].get().strip()
         try:
-            when = parse_time(f["time"].get())
+            text = f["time"].get().strip()
+            # The stamp taken when the entry was started (to the second), unless Time was changed by
+            # hand; a blank Time (nothing typed before Enter) is now.
+            when = self._stamp if self._stamp and text == self._stamp_text else parse_time(text)
             pid = self.patrol_ids.get(station)
             gar = f["gar"].get().strip()
             if pid and gar and gar != self.db.current_gar(pid) and not messagebox.askyesno(
@@ -1391,7 +1416,8 @@ class App:
             return
         for k in ("time", "position", "heading", "status", "remarks"):
             f[k].delete(0, "end")
-        self._gar_pid = None          # refill GAR with the (possibly new) latest score
+        self._stamp, self._stamp_text = None, ""   # the next entry gets its own time
+        self._gar_pid = None         # refill GAR with the (possibly new) latest score
         self._station_picked()
         f["type"].set("OPS NORMAL")
         self._default_direction()
