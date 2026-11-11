@@ -73,6 +73,18 @@ class TestTables(Base):
         self.assertEqual(self.db.patrol(self.pid)["pob"], 3)
         self.assertEqual(self.db.patrol(self.pid)["cell"], "555-0101")
 
+    def test_cell_defaults_to_coxswain_phone(self):
+        cox = self.db.save_member({"member_no": "1000020", "last_name": "Davit", "phone": "904-555-0199"},
+                                  {"COXSWAIN": "QUALIFIED"})
+        v = self.db.save_vessel({"facility_no": "901", "cell": "555-0300"})
+        pid = self.db.add_patrol(self.wid, v, cox, [self.c1])
+        self.assertEqual(self.db.patrol(pid)["cell"], "904-555-0199")
+        # coxswain without a phone: the vessel's cell; a cell typed in always wins
+        v2 = self.db.save_vessel({"facility_no": "902", "cell": "555-0301"})
+        self.assertEqual(self.db.patrol(self.db.add_patrol(self.wid, v2, self.cox, []))["cell"], "555-0301")
+        v3 = self.db.save_vessel({"facility_no": "903"})
+        self.assertEqual(self.db.patrol(self.db.add_patrol(self.wid, v3, cox, [], cell="777"))["cell"], "777")
+
     def test_more_than_three_vessels_and_crew(self):
         for n in range(4):
             v = self.db.save_vessel({"facility_no": f"90{n}", "name": f"Boat {n}"})

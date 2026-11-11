@@ -255,7 +255,7 @@ class PatrolDialog(Dialog):
         self.fp = ttk.Entry(b, width=44)
         self.cox = ttk.Combobox(b, width=42, state="readonly",
                                 values=["(none)"] + [member_label(c, c["status"]) for c in self.coxs])
-        self.cox.bind("<<ComboboxSelected>>", lambda e: self._sync_pob())
+        self.cox.bind("<<ComboboxSelected>>", lambda e: (self._sync_pob(), self._default_cell()))
         lf = ttk.Frame(b)
         self.crew_list = tk.Listbox(lf, selectmode="multiple", height=8, width=44, exportselection=False)
         sb = ttk.Scrollbar(lf, command=self.crew_list.yview)
@@ -272,7 +272,7 @@ class PatrolDialog(Dialog):
         self.row(3, "Coxswain", self.cox)
         self.row(4, "Crew (click to select)", lf)
         self.row(5, "POB", self.pob, "counted from the people picked; change if others are aboard")
-        self.row(6, "Cell #", self.cell)
+        self.row(6, "Cell #", self.cell, "the coxswain's phone; the boat's cell if none")
         self.row(7, "Ops normal every (min)", self.interval, "M2000.3G: 30 min unless ordered otherwise")
         self.row(8, "Mission", self.mission)
         self.row(9, "Float plan / area", self.fp)
@@ -302,9 +302,16 @@ class PatrolDialog(Dialog):
                 row=10, column=0, columnspan=3, sticky="w")
 
     def _vessel_picked(self, _e=None):
-        v = self.vessels[self.vessel.current()]
-        self.cell.delete(0, "end")
-        self.cell.insert(0, v["cell"])
+        self._default_cell()
+
+    def _default_cell(self):
+        """Cell # defaults to the coxswain's phone, or the vessel's cell when the coxswain has none."""
+        phone = self.coxs[self.cox.current() - 1]["phone"] if self.cox.current() > 0 else ""
+        if not phone and self.vessel.current() >= 0:
+            phone = self.vessels[self.vessel.current()]["cell"]
+        if phone:
+            self.cell.delete(0, "end")
+            self.cell.insert(0, phone)
 
     def _picked(self):
         cox = self.coxs[self.cox.current() - 1]["id"] if self.cox.current() > 0 else None
@@ -993,7 +1000,7 @@ class App:
 
         # patrol board
         board = ttk.LabelFrame(pw, text="Patrol board", padding=6)
-        cols = [("call_sign", "Call sign", 200), ("name", "Name", 150), ("po", "PO#", 70), ("cox", "Coxswain", 150),
+        cols = [("call_sign", "Call sign", 200), ("name", "Name", 150), ("po", "PO#", 70), ("cox", "Coxswain", 230),
                 ("crew", "Crew", 260), ("pob", "POB", 40), ("gar", "GAR", 40), ("state", "Status", 80),
                 ("last", "Last contact", 110), ("due", "Next report due", 120), ("left", "Min", 50)]
         bf = ttk.Frame(board)
@@ -1166,7 +1173,8 @@ class App:
             self.board.item(str(p["id"]), tags=(row["state"],), values=[
                 # Call sign from Data > Vessels; the facility # stands in until one is entered.
                 p["call_sign"] or f"Facility {p['facility_no']}", p["vessel_name"], p["patrol_order"],
-                (cox["last_name"] + (" (T)" if cox["trainee"] else "")) if cox else "", mates, p["pob"], p["gar"],
+                (cox["last_name"] + (" (T)" if cox["trainee"] else "") + (f"  {cox['phone']}" if cox["phone"] else ""))
+                if cox else "", mates, p["pob"], p["gar"],
                 row["state"], f"{fmt_z(row['last'])} / {fmt_local(row['last'])}" if row["last"] else "",
                 f"{fmt_z(row['due'])} / {fmt_local(row['due'])}" if row["due"] else "", left])
             label = f"{p['facility_no']} {p['vessel_name']}".strip()

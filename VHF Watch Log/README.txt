@@ -93,7 +93,8 @@ A WATCH
                    station used last is offered first), channels guarded, time check (the time.gov button opens
                    the official clock; "Checked" records it), radio check, equipment status.
 2. Add patrol...   Vessel, patrol order (PO#), GAR score, coxswain, crew (any number; trainees
-                   are marked automatically from their status), POB, cell #, mission (from
+                   are marked automatically from their status), POB, cell # (filled in with
+                   the coxswain's phone, or the boat's cell if the coxswain has none), mission (from
                    Data > Patrol types, or type another), float plan / area, ops-normal
                    interval. Any number of vessels.
 3. Log entries     Click a vessel on the patrol board, then Underway / Ops normal / Moored to
@@ -103,7 +104,8 @@ A WATCH
                    Safety, Lost comms, Radio check, Equipment, Watch relief, Other.
                    "Vessel / station" can also be typed freely (e.g. Station Mayport).
 4. Patrol board    Lists each vessel by its radio call sign (from Data > Vessels; the facility
-                   number is shown until a call sign is entered), with the last contact and when the next ops-normal report
+                   number is shown until a call sign is entered) and its coxswain with phone
+                   number, with the last contact and when the next ops-normal report
                    is due. Amber = due within 5 minutes, red = overdue. When a boat is overdue
                    a red banner appears and the computer beeps every minute until it reports.
                    Any contact with the boat restarts its clock (M2000.3G ch. 5, CG Boat Communications, 8.a).

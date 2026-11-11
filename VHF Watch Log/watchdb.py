@@ -793,13 +793,16 @@ class WatchDB:
         if v is None:
             raise LogError("Unknown vessel")
         people = ([coxswain_id] if coxswain_id else []) + [c for c in crew_ids if c != coxswain_id]
+        if cell is None:  # default: the coxswain's phone, else the vessel's cell
+            cox = self.member(coxswain_id) if coxswain_id else None
+            cell = (cox["phone"] if cox else "") or v["cell"]
         try:
             with self.con:
                 cur = self.con.execute(
                     "INSERT INTO patrols(watch_id, vessel_id, patrol_order, gar, pob, cell, mission,"
                     " float_plan, interval_min) VALUES(?,?,?,?,?,?,?,?,?)",
                     (wid, vessel_id, patrol_order, gar, pob if pob is not None else len(people),
-                     v["cell"] if cell is None else cell, mission, float_plan,
+                     cell, mission, float_plan,
                      interval_min or self.interval_min()))
                 pid = cur.lastrowid
                 self._set_crew(pid, coxswain_id, crew_ids)
